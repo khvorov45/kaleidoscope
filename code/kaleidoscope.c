@@ -15,6 +15,7 @@ typedef struct String {
 	u64 len; // NOTE(khvorov) Does not include the null terminator
 } String;
 
+
 typedef enum TokenType {
 	TokenType_EOF,
 
@@ -33,6 +34,78 @@ typedef struct Token {
 	f64 number;
 	u8 ascii;
 } Token;
+
+typedef struct TokenArray {
+	Token *ptr;
+	u64 len;
+	u64 cap;
+} TokenArray;
+
+
+typedef struct AstNumber {
+	f64 val;
+} AstNumber;
+
+typedef struct AstVariable {
+	String name;
+} AstVariable;
+
+typedef struct AstBinary {
+	char op;
+	struct AstNode *lhs;
+	struct AstNode *rhs;
+} AstBinary;
+
+typedef struct AstCall {
+	String callee;
+	struct AstNodeArray *args;
+	u8 arg_count;
+} AstCall;
+
+typedef struct AstPrototype {
+	String name;
+	String arg_names[4];
+} AstPrototype;
+
+typedef struct AstBlock {
+	struct AstNode *nodes;
+	u64 node_count;		
+} AstBlock;
+
+typedef struct AstFunction {
+	AstPrototype *proto;
+	AstBlock body;
+} AstFunction;
+
+typedef enum AstType {
+	AstType_None,
+	AstType_Number,
+	AstType_Variable,
+	AstType_Binary,
+	AstType_Call,
+	AstType_Prototype,
+	AstType_Block,
+	AstType_Function,
+} AstType;
+
+typedef struct AstNode {
+	AstType type;
+	union {
+		AstNumber number;
+		AstVariable variable;
+		AstBinary binary;
+		AstCall call;
+		AstPrototype prototype;
+		AstFunction function;
+		AstBlock block;
+	};
+} AstNode;
+
+typedef struct AstNodeArray {
+	AstNode *ptr;
+	u64 len;
+	u64 cap;
+} AstNodeArray;
 
 
 static bool
@@ -208,47 +281,121 @@ get_token(String *input) {
 	return result;
 }
 
+static TokenArray
+make_token_array() {
+	TokenArray result = { 0, 0, 100 };
+	result.ptr = malloc(sizeof(Token) * result.cap);
+	return result;
+}
 
-int 
-main() {
+static void
+token_array_push(TokenArray *arr, Token token) {
+	assert(arr->len <= arr->cap);
+	if (arr->len == arr->cap) {
+		arr->cap *= 2;
+		arr->ptr = realloc(arr->ptr, sizeof(Token) * arr->cap);
+	}
+	arr->ptr[arr->len] = token;
+	arr->len += 1;
+}
 
-	String input = string_from_cstring("#comment here \ntest 123.456 #comment\r\n def + -, extern #comment\r ");
 
-	while (true) {
-		Token token = get_token(&input);
+static AstNode
+parse_ast_number(TokenArray *tokens, u64 *token_index) {
+	Token *token = tokens->ptr + *token_index;
+	assert(token->type == TokenType_Number);
+	AstNumber number = { token->number };
+	AstNode result = { AstType_Number, number };
+	*token_index += 1;
+	return result;
+}
 
+static AstNodeArray
+make_ast_node_array(u64 cap) {
+	AstNodeArray result = { 0, 0, cap };
+	result.ptr = malloc(sizeof(AstNode) * result.cap);
+	return result;
+}
+
+static void
+ast_node_array_push(AstNodeArray *arr, AstNode node) {
+	assert(arr->len <= arr->cap);
+	if (arr->len == arr->cap) {
+		arr->cap *= 2;
+		arr->ptr = realloc(arr->ptr, sizeof(AstNode) * arr->cap);
+	}
+	arr->ptr[arr->len] = node;
+	arr->len += 1;
+}
+
+static AstBlock
+parse_ast_block(TokenArray *tokens, u64 *token_index) {
+
+	AstNodeArray ast_nodes = make_ast_node_array(20);
+
+	while (*token_index < tokens->len) {
+		Token token = tokens->ptr[*token_index];
+
+		AstNode ast_node = { 0 };
 		switch (token.type) {
 		case TokenType_EOF: {
-			printf("eof\n");
+			assert(!"unexpected eof");
 		} break;
 
 		case TokenType_Def: {
 			printf("def\n");
+			*token_index += 1;
 		} break;
 
 		case TokenType_Extern: {
 			printf("extern\n");
+			*token_index += 1;
 		} break;
 
 		case TokenType_Identifier: {
 			printf("TokenType_Identifier: '");
 			string_print(&token.identifier);
 			printf("'\n");
+			*token_index += 1;
 		} break;
 
 		case TokenType_Number: {
 			printf("TokenType_Number: '%f'\n", token.number);
+			ast_node = parse_ast_number(tokens, token_index);
 		} break;
 
 		case TokenType_Ascii: {
 			printf("TokenType_Ascii: '%c'\n", token.ascii);
+			*token_index += 1;
 		} break;
 		}
 
+		ast_node_array_push(&ast_nodes, ast_node);
+	}
+
+	AstBlock block = { ast_nodes.ptr, ast_nodes.len };
+	return block;
+}
+
+
+int
+main() {
+
+	String input = string_from_cstring("#comment here \ntest 123.456 #comment\r\n def + -, extern #comment\r ");
+
+	TokenArray tokens = make_token_array();
+
+	while (true) {
+		Token token = get_token(&input);
 		if (token.type == TokenType_EOF) {
 			break;
 		}
+		token_array_push(&tokens, token);
 	}
+
+	u64 token_index = 0;
+	AstBlock ast_block = parse_ast_block(&tokens, &token_index);
+	assert(token_index == tokens.len);
 
 	return 0;
 }
