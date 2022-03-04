@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 typedef uint8_t u8;
+typedef int32_t i32;
 typedef uint64_t u64;
 
 typedef double f64;
@@ -32,7 +33,7 @@ typedef struct Token {
 	TokenType type;
 	String identifier;
 	f64 number;
-	u8 ascii;
+	char ascii;
 } Token;
 
 typedef struct TokenArray {
@@ -58,7 +59,7 @@ typedef struct AstBinary {
 
 typedef struct AstCall {
 	String callee;
-	struct AstNodeArray *args;
+	struct AstNode *args;
 	u8 arg_count;
 } AstCall;
 
@@ -106,6 +107,12 @@ typedef struct AstNodeArray {
 	u64 len;
 	u64 cap;
 } AstNodeArray;
+
+typedef struct AstParser {
+	AstNodeArray nodes;
+	Token *token;
+	u64 token_count;
+} AstParser;
 
 
 static bool
@@ -281,6 +288,22 @@ get_token(String *input) {
 	return result;
 }
 
+static i32
+get_tok_precedence(Token *token) {
+	i32 result = -1;
+
+	if (token->type == TokenType_Ascii) {
+		switch (token->ascii) {
+		case '<': { result = 10; } break;
+		case '+': { result = 20; } break;
+		case '-': { result = 20; } break;
+		case '*': { result = 40; } break;
+		}
+	}
+
+	return result;
+}
+
 static TokenArray
 make_token_array() {
 	TokenArray result = { 0, 0, 100 };
@@ -300,91 +323,211 @@ token_array_push(TokenArray *arr, Token token) {
 }
 
 
-static AstNode
-parse_ast_number(TokenArray *tokens, u64 *token_index) {
-	Token *token = tokens->ptr + *token_index;
-	assert(token->type == TokenType_Number);
-	AstNumber number = { token->number };
-	AstNode result = { AstType_Number, number };
-	*token_index += 1;
-	return result;
+static void 
+parser_advance(AstParser *parser) {
+	assert(parser->token_count > 0);
+	parser->token += 1;
+	parser->token_count -= 1;
 }
 
 static AstNodeArray
-make_ast_node_array(u64 cap) {
-	AstNodeArray result = { 0, 0, cap };
+make_ast_node_array() {
+	AstNodeArray result = { 0, 0, 100 };
 	result.ptr = malloc(sizeof(AstNode) * result.cap);
 	return result;
 }
 
-static void
+static AstNode *
 ast_node_array_push(AstNodeArray *arr, AstNode node) {
 	assert(arr->len <= arr->cap);
 	if (arr->len == arr->cap) {
 		arr->cap *= 2;
 		arr->ptr = realloc(arr->ptr, sizeof(AstNode) * arr->cap);
 	}
-	arr->ptr[arr->len] = node;
+	AstNode *result = arr->ptr + arr->len;
+	*result = node;
 	arr->len += 1;
+	return result;
 }
 
-static AstBlock
-parse_ast_block(TokenArray *tokens, u64 *token_index) {
+static AstNode *
+parse_number(AstParser *parser) {
+	Token *token = parser->token;
+	assert(token->type == TokenType_Number);
+	AstNumber number = { token->number };
+	AstNode num_node = { AstType_Number, .number = number };
+	parser_advance(parser);
 
-	AstNodeArray ast_nodes = make_ast_node_array(20);
+	AstNode *result = ast_node_array_push(&parser->nodes, num_node);
+	return result;
+}
 
-	while (*token_index < tokens->len) {
-		Token token = tokens->ptr[*token_index];
+static AstNode *parse_primary(AstParser *parser);
+static AstNode *parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs);
 
-		AstNode ast_node = { 0 };
-		switch (token.type) {
+static AstNode *
+parse_expr(AstParser *parser) {
+	AstNode *lhs = parse_primary(parser);
+	AstNode *result = parse_binop_rhs(parser, 0, lhs);
+	return result;
+}
+
+static AstNode *
+parse_paren(AstParser *parser) {
+	assert(parser->token->type == TokenType_Ascii);
+	assert(parser->token->ascii == '(');
+	parser_advance(parser);
+
+	AstNode *expr = parse_expr(parser);
+
+	assert(parser->token->type == TokenType_Ascii);
+	assert(parser->token->ascii == ')');
+	parser_advance(parser);
+
+	return expr;
+}
+
+static AstNode *
+parse_iden(AstParser *parser) {
+	assert(parser->token->type == TokenType_Identifier);
+	String name = parser->token->identifier;
+	parser_advance(parser);
+
+	AstNode *result = 0;
+	if (parser->token->type != TokenType_Ascii || parser->token->ascii != '(') {
+		AstVariable var = { name };
+		AstNode var_node = { AstType_Variable, .variable = var };
+		result = ast_node_array_push(&parser->nodes, var_node);
+	} else {
+
+		parser_advance(parser);
+		AstCall call = { name, parser->nodes.ptr + parser->nodes.len, 0 };
+
+		while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
+			assert(call.arg_count < 255);
+			parse_expr(parser);
+			call.arg_count += 1;
+		}
+		parser_advance(parser);
+
+		AstNode call_node = { AstType_Call, .call = call };
+		result = ast_node_array_push(&parser->nodes, call_node);
+	}
+
+	return result;
+}
+
+static AstNode *
+parse_primary(AstParser *parser) {
+	
+	AstNode *result = 0;
+
+	switch (parser->token->type) {
+
+	case TokenType_Identifier: {
+		result = parse_iden(parser);
+	} break;
+
+	case TokenType_Number: {
+		result = parse_number(parser);
+	} break;
+
+	case TokenType_Ascii: {
+		if (parser->token->ascii == '(') {
+			result = parse_paren(parser);
+		}
+	} break;
+
+	}
+
+	assert(result != 0);
+	return result;
+}
+
+static AstNode *
+parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
+	AstNode *result = lhs;
+
+	while (true) {
+		i32 token_precendence = get_tok_precedence(parser->token);
+		if (token_precendence < precedence) {
+			break;
+		}
+
+		char binop = parser->token->ascii;
+		parser_advance(parser);
+
+		AstNode *rhs = parse_primary(parser);
+		
+		i32 next_prec = get_tok_precedence(parser->token);
+		if (token_precendence < next_prec) {
+			rhs = parse_binop_rhs(parser, token_precendence + 1, rhs);
+		}
+
+		AstBinary merged = { binop, result, rhs };
+		AstNode merged_node = { AstType_Binary, .binary = merged };
+		result = ast_node_array_push(&parser->nodes, merged_node);
+	}
+
+	return result;
+}
+
+static AstNode *
+parse_block(AstParser *parser) {
+
+	AstBlock block = { parser->nodes.ptr + parser->nodes.len, 0 };
+	while (parser->token_count > 0) {
+		Token *token = parser->token;
+
+		switch (token->type) {
 		case TokenType_EOF: {
 			assert(!"unexpected eof");
 		} break;
 
 		case TokenType_Def: {
 			printf("def\n");
-			*token_index += 1;
+			parser_advance(parser);
 		} break;
 
 		case TokenType_Extern: {
 			printf("extern\n");
-			*token_index += 1;
+			parser_advance(parser);
 		} break;
 
 		case TokenType_Identifier: {
 			printf("TokenType_Identifier: '");
-			string_print(&token.identifier);
+			string_print(&token->identifier);
 			printf("'\n");
-			*token_index += 1;
+			parser_advance(parser);
 		} break;
 
 		case TokenType_Number: {
-			printf("TokenType_Number: '%f'\n", token.number);
-			ast_node = parse_ast_number(tokens, token_index);
+			printf("TokenType_Number: '%f'\n", token->number);
+			parse_number(parser);
 		} break;
 
 		case TokenType_Ascii: {
-			printf("TokenType_Ascii: '%c'\n", token.ascii);
-			*token_index += 1;
+			printf("TokenType_Ascii: '%c'\n", token->ascii);
+			parser_advance(parser);
 		} break;
 		}
 
-		ast_node_array_push(&ast_nodes, ast_node);
+		block.node_count += 1;
 	}
 
-	AstBlock block = { ast_nodes.ptr, ast_nodes.len };
-	return block;
+	AstNode block_node = { AstType_Block, .block = block };
+	AstNode *result = ast_node_array_push(&parser->nodes, block_node);
+
+	return result;
 }
 
 
 int
 main() {
 
-	String input = string_from_cstring("#comment here \ntest 123.456 #comment\r\n def + -, extern #comment\r ");
+	String input = string_from_cstring("a + b");
 
 	TokenArray tokens = make_token_array();
-
 	while (true) {
 		Token token = get_token(&input);
 		if (token.type == TokenType_EOF) {
@@ -393,9 +536,10 @@ main() {
 		token_array_push(&tokens, token);
 	}
 
-	u64 token_index = 0;
-	AstBlock ast_block = parse_ast_block(&tokens, &token_index);
-	assert(token_index == tokens.len);
+	AstNodeArray ast_node_array = make_ast_node_array();
+	AstParser parser = { ast_node_array, tokens.ptr, tokens.len };
+	parse_block(&parser);
+	assert(parser.token_count == 0);
 
 	return 0;
 }
