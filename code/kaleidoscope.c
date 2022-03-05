@@ -51,6 +51,10 @@ typedef struct AstVariable {
 	String name;
 } AstVariable;
 
+typedef struct AstFnParameter {
+	String name;
+} AstFnParameter;
+
 typedef struct AstBinary {
 	char op;
 	struct AstNode *lhs;
@@ -65,7 +69,8 @@ typedef struct AstCall {
 
 typedef struct AstPrototype {
 	String name;
-	String arg_names[4];
+	struct AstNode *param;
+	u8 param_count;
 } AstPrototype;
 
 typedef struct AstBlock {
@@ -74,14 +79,15 @@ typedef struct AstBlock {
 } AstBlock;
 
 typedef struct AstFunction {
-	AstPrototype *proto;
-	AstBlock body;
+	struct AstNode *proto;
+	struct AstNode *body;
 } AstFunction;
 
 typedef enum AstType {
 	AstType_None,
 	AstType_Number,
 	AstType_Variable,
+	AstType_FnParameter,
 	AstType_Binary,
 	AstType_Call,
 	AstType_Prototype,
@@ -94,6 +100,7 @@ typedef struct AstNode {
 	union {
 		AstNumber number;
 		AstVariable variable;
+		AstFnParameter fn_parameter;
 		AstBinary binary;
 		AstCall call;
 		AstPrototype prototype;
@@ -289,11 +296,11 @@ get_token(String *input) {
 }
 
 static i32
-get_tok_precedence(Token *token) {
+get_cur_tok_precedence(AstParser *parser) {
 	i32 result = -1;
 
-	if (token->type == TokenType_Ascii) {
-		switch (token->ascii) {
+	if (parser->token_count > 0 && parser->token->type == TokenType_Ascii) {
+		switch (parser->token->ascii) {
 		case '<': { result = 10; } break;
 		case '+': { result = 20; } break;
 		case '-': { result = 20; } break;
@@ -449,7 +456,7 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 	AstNode *result = lhs;
 
 	while (true) {
-		i32 token_precendence = get_tok_precedence(parser->token);
+		i32 token_precendence = get_cur_tok_precedence(parser);
 		if (token_precendence < precedence) {
 			break;
 		}
@@ -459,7 +466,7 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 
 		AstNode *rhs = parse_primary(parser);
 		
-		i32 next_prec = get_tok_precedence(parser->token);
+		i32 next_prec = get_cur_tok_precedence(parser);
 		if (token_precendence < next_prec) {
 			rhs = parse_binop_rhs(parser, token_precendence + 1, rhs);
 		}
@@ -473,52 +480,65 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 }
 
 static AstNode *
-parse_block(AstParser *parser) {
+parse_prototype(AstParser *parser) {
+	assert(parser->token->type == TokenType_Identifier);
 
-	AstBlock block = { parser->nodes.ptr + parser->nodes.len, 0 };
-	while (parser->token_count > 0) {
-		Token *token = parser->token;
+	String fn_name = parser->token->identifier;
+	parser_advance(parser);
 
-		switch (token->type) {
-		case TokenType_EOF: {
-			assert(!"unexpected eof");
-		} break;
+	assert(parser->token->type == TokenType_Ascii && parser->token->ascii == '(');
+	parser_advance(parser);
 
-		case TokenType_Def: {
-			printf("def\n");
-			parser_advance(parser);
-		} break;
-
-		case TokenType_Extern: {
-			printf("extern\n");
-			parser_advance(parser);
-		} break;
-
-		case TokenType_Identifier: {
-			printf("TokenType_Identifier: '");
-			string_print(&token->identifier);
-			printf("'\n");
-			parser_advance(parser);
-		} break;
-
-		case TokenType_Number: {
-			printf("TokenType_Number: '%f'\n", token->number);
-			parse_number(parser);
-		} break;
-
-		case TokenType_Ascii: {
-			printf("TokenType_Ascii: '%c'\n", token->ascii);
-			parser_advance(parser);
-		} break;
-		}
-
-		block.node_count += 1;
+	AstPrototype proto = { fn_name, parser->nodes.ptr + parser->nodes.len, 0 };
+	while (parser->token->type == TokenType_Ascii && parser->token->ascii == ')') {
+		assert(parser->token->type == TokenType_Identifier);
+		assert(proto.param_count < 255);
+		String param_name = parser->token->identifier;
+		AstFnParameter param = { param_name };
+		AstNode param_node = { AstType_FnParameter, .fn_parameter = param };
+		ast_node_array_push(&parser->nodes, param_node);
+		proto.param_count += 1;
+		parser_advance(parser);
 	}
 
-	AstNode block_node = { AstType_Block, .block = block };
-	AstNode *result = ast_node_array_push(&parser->nodes, block_node);
-
+	AstNode proto_node = { AstType_Prototype, .prototype = proto };
+	AstNode *result = ast_node_array_push(&parser->nodes, proto_node);
 	return result;
+}
+
+static AstNode *
+parse_definition(AstParser *parser) {
+	assert(parser->token->type == TokenType_Def);
+	parser_advance(parser);
+	
+	AstNode *proto = parse_prototype(parser);
+	AstNode *body = parse_expr(parser);
+
+	AstFunction fn = { proto, body };
+	AstNode fn_node = { AstType_Function, .function = fn };
+	AstNode *result = ast_node_array_push(&parser->nodes, fn_node);
+	return result;
+}
+
+static AstNode *
+parse_extern(AstParser *parser) {
+	assert(parser->token->type == TokenType_Extern);
+	parser_advance(parser);
+
+	AstNode *proto = parse_prototype(parser);
+	return proto;
+}
+
+static AstNode *
+parse_top_level_expr(AstParser *parser) {
+	AstNode *expr = parse_expr(parser);
+	AstPrototype proto = { 0 };
+	AstNode proto_node = { AstType_Prototype, .prototype = proto };
+	AstNode *proto_node_ptr = ast_node_array_push(&parser->nodes, proto_node);
+	AstFunction fn = { proto_node_ptr, expr };
+	AstNode fn_node = { AstType_Function, .function = fn };
+	AstNode *fn_node_ptr = ast_node_array_push(&parser->nodes, fn_node);
+	return fn_node_ptr;
 }
 
 
@@ -538,8 +558,34 @@ main() {
 
 	AstNodeArray ast_node_array = make_ast_node_array();
 	AstParser parser = { ast_node_array, tokens.ptr, tokens.len };
-	parse_block(&parser);
-	assert(parser.token_count == 0);
+
+	while (parser.token_count > 0) {
+		Token *token = parser.token;
+
+		switch (token->type) {
+		case TokenType_EOF: {
+			assert(!"unexpected eof");
+		} break;
+
+		case TokenType_Ascii: {
+			if (token->ascii == ';') {
+				parser_advance(&parser);
+			}
+		} break;
+
+		case TokenType_Def: {
+			parse_definition(&parser);
+		} break;
+
+		case TokenType_Extern: {
+			parse_extern(&parser);
+		} break;
+
+		default: {
+			parse_top_level_expr(&parser);
+		} break;
+		}
+	}
 
 	return 0;
 }
