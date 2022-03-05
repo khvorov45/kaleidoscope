@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
+#include "llvm-c/Core.h"
+
 typedef uint8_t u8;
 typedef int32_t i32;
 typedef uint64_t u64;
@@ -542,10 +544,21 @@ parse_top_level_expr(AstParser *parser) {
 }
 
 
+static LLVMValueRef
+lb_number(AstNode *node) {
+	assert(node->type == AstType_Number);
+	f64 val = node->number.val;
+	LLVMContextRef ctx = LLVMGetGlobalContext();
+	LLVMTypeRef type_double = LLVMDoubleTypeInContext(ctx);	
+	LLVMValueRef llvm_val = LLVMConstReal(type_double, val);
+	return llvm_val;
+}
+
+
 int
 main() {
 
-	String input = string_from_cstring("a + b");
+	String input = string_from_cstring("a + 1");
 
 	TokenArray tokens = make_token_array();
 	while (true) {
