@@ -11,6 +11,7 @@
 #pragma warning(disable:4820) // padding
 #pragma warning(disable:4255) // no function prototype given: converting '()' to '(void)'
 #pragma warning(disable:5045) // Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified
+#pragma warning(disable:4100) // unreferenced formal parameter
 #endif
 
 
@@ -72,7 +73,7 @@ typedef struct AstPrototype {
 
 typedef struct AstBlock {
 	struct AstNode *nodes;
-	u64 node_count;		
+	isize node_count;		
 } AstBlock;
 
 typedef struct AstFunction {
@@ -109,14 +110,23 @@ typedef struct AstNode {
 typedef struct AstParser {
 	AstNode *nodes;
 	Token *token;
-	u64 token_count;
+	isize token_count;
 } AstParser;
+
+
+GB_TABLE(static, NamedValues, named_values_, LLVMValueRef)
+
+typedef struct LLVMBackend {
+	LLVMContextRef ctx;
+	LLVMBuilderRef builder;
+	NamedValues named_values;
+} LLVMBackend;
 
 
 static String
 string_from_cstring(char *ptr) {
-	u64 len = 0;
-	for (u64 index = 0; ; index += 1) {
+	isize len = 0;
+	for (isize index = 0; ; index += 1) {
 		char ch = ptr[index];
 		if (ch == '\0') {
 			break;
@@ -228,7 +238,7 @@ get_token(String *input) {
 	if (input->len > 0) {
 		if (gb_char_is_alpha(input->ptr[0])) {
 
-			u64 identifier_end = string_index_nonalphanum(input);
+			isize identifier_end = string_index_nonalphanum(input);
 			string_offset(input, identifier_end, &result.identifier);
 
 			if (string_cmp_cstring(&result.identifier, "def")) {
@@ -241,7 +251,7 @@ get_token(String *input) {
 
 		} else if (gb_char_is_digit(input->ptr[0])) {
 
-			u64 number_end = string_index_nonfloat(input);
+			isize number_end = string_index_nonfloat(input);
 			result.number = strtod(input->ptr, 0);
 			string_offset(input, number_end, &result.identifier);
 
@@ -474,17 +484,70 @@ parse_top_level_expr(AstParser *parser) {
 	return fn_node_ptr;
 }
 
+static LLVMValueRef lb_node(LLVMBackend *lb, AstNode *node);
 
 static LLVMValueRef
-lb_number(AstNode *node) {
+lb_number(LLVMBackend *lb, AstNode *node) {
 	GB_ASSERT(node->type == AstType_Number);
 	f64 val = node->number.val;
-	LLVMContextRef ctx = LLVMGetGlobalContext();
-	LLVMTypeRef type_double = LLVMDoubleTypeInContext(ctx);	
+	LLVMTypeRef type_double = LLVMDoubleTypeInContext(lb->ctx);	
 	LLVMValueRef llvm_val = LLVMConstReal(type_double, val);
 	return llvm_val;
 }
 
+static LLVMValueRef
+lb_variable(LLVMBackend *lb, AstNode *node) {
+	GB_ASSERT(node->type == AstType_Variable);
+	String name = node->variable.name;
+	u64 name_hash = gb_murmur64(name.ptr, name.len);
+	LLVMValueRef *val = named_values_get(&lb->named_values, name_hash);
+	GB_ASSERT_NOT_NULL(val);
+	LLVMValueRef result = *val;
+	return result;
+}
+
+static LLVMValueRef
+lb_binary(LLVMBackend *lb, AstNode *node) {
+	GB_ASSERT(node->type == AstType_Binary);
+
+	LLVMValueRef lhs = lb_node(lb, node->binary.lhs);
+	LLVMValueRef rhs = lb_node(lb, node->binary.rhs);
+
+	LLVMValueRef result = 0;
+
+	switch (node->binary.op) {
+	
+	case '+': {
+		result = LLVMBuildFAdd(lb->builder, lhs, rhs, "addtmp");
+	} break;
+	
+	case '-': {
+		result = LLVMBuildFSub(lb->builder, lhs, rhs, "subtmp");
+	} break;
+
+	case '*': {
+		result = LLVMBuildFMul(lb->builder, lhs, rhs, "multmp");
+	} break;
+
+	case '<': {
+		LLVMValueRef logical = LLVMBuildFCmp(lb->builder, LLVMRealULT, lhs, rhs, "cmptmp");
+		LLVMTypeRef type_double = LLVMDoubleTypeInContext(lb->ctx);	
+		result = LLVMBuildUIToFP(lb->builder, logical, type_double, "booltemp");
+	} break;
+
+	default: {
+		GB_PANIC("unexpected binary op");
+	}
+	}
+
+	return result;
+}
+
+static LLVMValueRef
+lb_node(LLVMBackend *lb, AstNode *node) {
+	LLVMValueRef result = 0;
+	return result;
+}
 
 int
 main() {
@@ -507,33 +570,38 @@ main() {
 	gb_array_init(nodes, heap_allocator);
 	AstParser parser = { nodes, tokens, gb_array_count(tokens) };
 
-	while (parser.token_count > 0) {
-		Token *token = parser.token;
+	AstNode *top_level_node = 0;
+	switch (parser.token->type) {
+	case TokenType_EOF: {
+		GB_ASSERT(!"unexpected eof");
+	} break;
 
-		switch (token->type) {
-		case TokenType_EOF: {
-			GB_ASSERT(!"unexpected eof");
-		} break;
-
-		case TokenType_Ascii: {
-			if (token->ascii == ';') {
-				parser_advance(&parser);
-			}
-		} break;
-
-		case TokenType_Def: {
-			parse_definition(&parser);
-		} break;
-
-		case TokenType_Extern: {
-			parse_extern(&parser);
-		} break;
-
-		default: {
-			parse_top_level_expr(&parser);
-		} break;
+	case TokenType_Ascii: {
+		if (parser.token->ascii == ';') {
+			parser_advance(&parser);
 		}
+	} break;
+
+	case TokenType_Def: {
+		top_level_node = parse_definition(&parser);
+	} break;
+
+	case TokenType_Extern: {
+		top_level_node = parse_extern(&parser);
+	} break;
+
+	default: {
+		top_level_node = parse_top_level_expr(&parser);
+	} break;
 	}
+	GB_ASSERT_NOT_NULL(top_level_node);
+
+	LLVMBackend llvm_backend;
+	llvm_backend.ctx = LLVMGetGlobalContext();
+	llvm_backend.builder = LLVMCreateBuilderInContext(llvm_backend.ctx);
+	named_values_init(&llvm_backend.named_values, heap_allocator);
+
+	lb_node(&llvm_backend, top_level_node);
 
 	return 0;
 }
