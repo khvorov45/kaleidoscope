@@ -108,13 +108,14 @@ typedef struct AstNode {
 } AstNode;
 
 typedef struct AstParser {
-	AstNode *nodes;
+	gbDynamicArray nodes;
 	Token *token;
 	isize token_count;
 } AstParser;
 
-
-GB_TABLE(static, NamedValues, named_values_, LLVMValueRef)
+typedef struct NamedValues {
+	isize ignore;
+} NamedValues;
 
 typedef struct LLVMBackend {
 	LLVMContextRef ctx;
@@ -298,10 +299,7 @@ parse_number(AstParser *parser) {
 	AstNumber number = { token->number };
 	AstNode num_node = { AstType_Number, .number = number };
 	parser_advance(parser);
-
-	gb_array_append(parser->nodes, num_node);
-	AstNode *result = gb_array_last(parser->nodes);
-
+	AstNode *result = gb_array_append(&parser->nodes, &num_node);
 	return result;
 }
 
@@ -340,12 +338,11 @@ parse_iden(AstParser *parser) {
 	if (parser->token->type != TokenType_Ascii || parser->token->ascii != '(') {
 		AstVariable var = { name };
 		AstNode var_node = { AstType_Variable, .variable = var };
-		gb_array_append(parser->nodes, var_node);
-		result = gb_array_last(parser->nodes);
+		result = gb_array_append(&parser->nodes, &var_node);
 	} else {
 
 		parser_advance(parser);
-		AstCall call = { name, parser->nodes + gb_array_count(parser->nodes), 0 };
+		AstCall call = { name, (AstNode *)parser->nodes.ptr + parser->nodes.len, 0 };
 
 		while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
 			GB_ASSERT(call.arg_count < 255);
@@ -355,8 +352,7 @@ parse_iden(AstParser *parser) {
 		parser_advance(parser);
 
 		AstNode call_node = { AstType_Call, .call = call };
-		gb_array_append(parser->nodes, call_node);
-		result = gb_array_last(parser->nodes);
+		result = gb_array_append(&parser->nodes, &call_node);
 	}
 
 	return result;
@@ -411,8 +407,7 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 
 		AstBinary merged = { binop, result, rhs };
 		AstNode merged_node = { AstType_Binary, .binary = merged };
-		gb_array_append(parser->nodes, merged_node);
-		result = gb_array_last(parser->nodes);
+		result = gb_array_append(&parser->nodes, &merged_node);
 	}
 
 	return result;
@@ -428,21 +423,20 @@ parse_prototype(AstParser *parser) {
 	GB_ASSERT(parser->token->type == TokenType_Ascii && parser->token->ascii == '(');
 	parser_advance(parser);
 
-	AstPrototype proto = { fn_name, parser->nodes + gb_array_count(parser->nodes), 0 };
+	AstPrototype proto = { fn_name, (AstNode *)parser->nodes.ptr + parser->nodes.len, 0 };
 	while (parser->token->type == TokenType_Ascii && parser->token->ascii == ')') {
 		GB_ASSERT(parser->token->type == TokenType_Identifier);
 		GB_ASSERT(proto.param_count < 255);
 		String param_name = parser->token->identifier;
 		AstFnParameter param = { param_name };
 		AstNode param_node = { AstType_FnParameter, .fn_parameter = param };
-		gb_array_append(parser->nodes, param_node);
+		gb_array_append(&parser->nodes, &param_node);
 		proto.param_count += 1;
 		parser_advance(parser);
 	}
 
 	AstNode proto_node = { AstType_Prototype, .prototype = proto };
-	gb_array_append(parser->nodes, proto_node);
-	AstNode *result = gb_array_last(parser->nodes);
+	AstNode *result = gb_array_append(&parser->nodes, &proto_node);
 	return result;
 }
 
@@ -456,8 +450,7 @@ parse_definition(AstParser *parser) {
 
 	AstFunction fn = { proto, body };
 	AstNode fn_node = { AstType_Function, .function = fn };
-	gb_array_append(parser->nodes, fn_node);
-	AstNode *result = gb_array_last(parser->nodes);
+	AstNode *result = gb_array_append(&parser->nodes, &fn_node);
 	return result;
 }
 
@@ -475,14 +468,24 @@ parse_top_level_expr(AstParser *parser) {
 	AstNode *expr = parse_expr(parser);
 	AstPrototype proto = { 0 };
 	AstNode proto_node = { AstType_Prototype, .prototype = proto };
-	gb_array_append(parser->nodes, proto_node);
-	AstNode *proto_node_ptr = gb_array_last(parser->nodes);
+	AstNode *proto_node_ptr = gb_array_append(&parser->nodes, &proto_node);
 	AstFunction fn = { proto_node_ptr, expr };
 	AstNode fn_node = { AstType_Function, .function = fn };
-	gb_array_append(parser->nodes, fn_node);
-	AstNode *fn_node_ptr = gb_array_last(parser->nodes);
+	AstNode *fn_node_ptr = gb_array_append(&parser->nodes, &fn_node);
 	return fn_node_ptr;
 }
+
+static void
+named_values_init(NamedValues *named_values, gbAllocator allocator) {
+	return;
+}
+
+static LLVMValueRef
+named_values_get(NamedValues *named_values, u64 hash) {
+	LLVMValueRef result = 0;
+	return result;
+}
+
 
 static LLVMValueRef lb_node(LLVMBackend *lb, AstNode *node);
 
@@ -500,9 +503,7 @@ lb_variable(LLVMBackend *lb, AstNode *node) {
 	GB_ASSERT(node->type == AstType_Variable);
 	String name = node->variable.name;
 	u64 name_hash = gb_murmur64(name.ptr, name.len);
-	LLVMValueRef *val = named_values_get(&lb->named_values, name_hash);
-	GB_ASSERT_NOT_NULL(val);
-	LLVMValueRef result = *val;
+	LLVMValueRef result = named_values_get(&lb->named_values, name_hash);
 	return result;
 }
 
@@ -552,23 +553,24 @@ lb_node(LLVMBackend *lb, AstNode *node) {
 int
 main() {
 
-	String input = string_from_cstring("a + 1");
+	String input = string_from_cstring("a + 1 + 2 - 1 > 3 + 2 + f + s + a");
 
 	gbAllocator heap_allocator = gb_heap_allocator();
 
-	gbArray(Token) tokens;
-	gb_array_init(tokens, heap_allocator);
+	gbDynamicArray tokens = { 0 };
+	gb_array_init(&tokens, heap_allocator, sizeof(Token));
 	while (true) {
 		Token token = get_token(&input);
 		if (token.type == TokenType_EOF) {
 			break;
 		}
-		gb_array_append(tokens, token);
+		gb_array_append(&tokens, &token);
 	}
 
-	gbArray(AstNode) nodes;
-	gb_array_init(nodes, heap_allocator);
-	AstParser parser = { nodes, tokens, gb_array_count(tokens) };
+	AstParser parser = { 0 };
+	gb_array_init(&parser.nodes, heap_allocator, sizeof(AstNode));
+	parser.token = tokens.ptr;
+	parser.token_count = tokens.len;
 
 	AstNode *top_level_node = 0;
 	switch (parser.token->type) {

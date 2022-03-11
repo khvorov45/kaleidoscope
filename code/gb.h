@@ -1662,99 +1662,26 @@ void foo(void) {
 }
 #endif
 
-typedef struct gbArrayHeader {
+typedef struct gbDynamicArray {
+	void       	*ptr;
+	isize       len;
+	isize       cap;
+	isize       element_size;
 	gbAllocator allocator;
-	isize       count;
-	isize       capacity;
-} gbArrayHeader;
+} gbDynamicArray;
 
-// NOTE(bill): This thing is magic!
-#define gbArray(Type) Type *
-
-#ifndef GB_ARRAY_GROW_FORMULA
-#define GB_ARRAY_GROW_FORMULA(x) (2*(x) + 8)
-#endif
-
-GB_STATIC_ASSERT(GB_ARRAY_GROW_FORMULA(0) > 0);
-
-#define GB_ARRAY_HEADER(x)    (cast(gbArrayHeader *)(x) - 1)
-#define gb_array_allocator(x) (GB_ARRAY_HEADER(x)->allocator)
-#define gb_array_count(x)     (GB_ARRAY_HEADER(x)->count)
-#define gb_array_capacity(x)  (GB_ARRAY_HEADER(x)->capacity)
-
-// TODO(bill): Have proper alignment!
-#define gb_array_init_reserve(x, allocator_, cap) do { \
-	void **gb__array_ = cast(void **)&(x); \
-	gbArrayHeader *gb__ah = cast(gbArrayHeader *)gb_alloc(allocator_, gb_size_of(gbArrayHeader)+gb_size_of(*(x))*(cap)); \
-	gb__ah->allocator = allocator_; \
-	gb__ah->count = 0; \
-	gb__ah->capacity = cap; \
-	*gb__array_ = cast(void *)(gb__ah+1); \
-} while (0)
-
-// NOTE(bill): Give it an initial default capacity
-#define gb_array_init(x, allocator) gb_array_init_reserve(x, allocator, GB_ARRAY_GROW_FORMULA(0))
-
-#define gb_array_free(x) do { \
-	gbArrayHeader *gb__ah = GB_ARRAY_HEADER(x); \
-	gb_free(gb__ah->allocator, gb__ah); \
-} while (0)
-
-#define gb_array_set_capacity(x, capacity) do { \
-	if (x) { \
-		void **gb__array_ = cast(void **)&(x); \
-		*gb__array_ = gb__array_set_capacity((x), (capacity), gb_size_of(*(x))); \
-	} \
-} while (0)
-
-// NOTE(bill): Do not use the thing below directly, use the macro
-GB_DEF void *gb__array_set_capacity(void *array, isize capacity, isize element_size);
-
-
-// TODO(bill): Decide on a decent growing formula for gbArray
-#define gb_array_grow(x, min_capacity) do { \
-	isize new_capacity = GB_ARRAY_GROW_FORMULA(gb_array_capacity(x)); \
-	if (new_capacity < (min_capacity)) \
-		new_capacity = (min_capacity); \
-	gb_array_set_capacity(x, new_capacity); \
-} while (0)
-
-
-#define gb_array_append(x, item) do { \
-	if (gb_array_capacity(x) < gb_array_count(x)+1) \
-		gb_array_grow(x, 0); \
-	(x)[gb_array_count(x)++] = (item); \
-} while (0)
-
-#define gb_array_appendv(x, items, item_count) do { \
-	gbArrayHeader *gb__ah = GB_ARRAY_HEADER(x); \
-	GB_ASSERT(gb_size_of((items)[0]) == gb_size_of((x)[0])); \
-	if (gb__ah->capacity < gb__ah->count+(item_count)) \
-		gb_array_grow(x, gb__ah->count+(item_count)); \
-	gb_memcopy(&(x)[gb__ah->count], (items), gb_size_of((x)[0])*(item_count));\
-	gb__ah->count += (item_count); \
-} while (0)
-
-
-
-#define gb_array_pop(x)   do { GB_ASSERT(GB_ARRAY_HEADER(x)->count > 0); GB_ARRAY_HEADER(x)->count--; } while (0)
-#define gb_array_clear(x) do { GB_ARRAY_HEADER(x)->count = 0; } while (0)
-
-#define gb_array_resize(x, new_count) do { \
-	if (GB_ARRAY_HEADER(x)->capacity < (new_count)) \
-		gb_array_grow(x, (new_count)); \
-	GB_ARRAY_HEADER(x)->count = (new_count); \
-} while (0)
-
-
-#define gb_array_reserve(x, new_capacity) do { \
-	if (GB_ARRAY_HEADER(x)->capacity < (new_capacity)) \
-		gb_array_set_capacity(x, new_capacity); \
-} while (0)
-
-#define gb_array_last(x) ((x) + gb_array_count(x) - 1)
-
-
+GB_DEF isize gb_array_grow_formula(isize x);
+GB_DEF void gb_array_init_reserve(gbDynamicArray *arr, gbAllocator allocator, isize element_size, isize cap);
+GB_DEF void gb_array_init(gbDynamicArray *arr, gbAllocator allocator, isize element_size);
+GB_DEF void gb_array_free(gbDynamicArray *arr);
+GB_DEF void gb_array_set_capacity(gbDynamicArray *array, isize capacity);
+GB_DEF void gb_array_grow(gbDynamicArray *arr, isize min_capacity);
+GB_DEF void *gb_array_append(gbDynamicArray *arr, void *item);
+GB_DEF void *gb_array_appendv(gbDynamicArray *arr, void *items, isize item_count);
+GB_DEF void gb_array_pop(gbDynamicArray *arr);
+GB_DEF void gb_array_clear(gbDynamicArray *arr);
+GB_DEF void gb_array_resize(gbDynamicArray *arr, isize new_count);
+GB_DEF void gb_array_reserve(gbDynamicArray *arr, isize new_capacity);
 
 ////////////////////////////////////////////////////////////////
 //
@@ -1873,7 +1800,7 @@ gb_internal b32 GB_JOIN2(FUNC,_full)(NAME *h) { \
 } \
 \
 void GB_JOIN2(FUNC,grow)(NAME *h) { \
-	isize new_count = GB_ARRAY_GROW_FORMULA(gb_array_count(h->entries)); \
+	isize new_count = gb_array_grow_formula(gb_array_count(h->entries)); \
 	GB_JOIN2(FUNC,rehash)(h, new_count); \
 } \
 \
@@ -7014,37 +6941,105 @@ isize gb_utf8_encode_rune(u8 buf[4], Rune r) {
 //
 //
 
+isize 
+gb_array_grow_formula(isize old_count) { 
+	isize result = 2*(old_count) + 8;
+	return result;
+}
 
-gb_no_inline void *gb__array_set_capacity(void *array, isize capacity, isize element_size) {
-	gbArrayHeader *h = GB_ARRAY_HEADER(array);
+// TODO(bill): Have proper alignment!
+void
+gb_array_init_reserve(gbDynamicArray *arr, gbAllocator allocator, isize element_size, isize cap) {
+	arr->allocator = allocator;
+	arr->len = 0;
+	arr->cap = cap;
+	arr->element_size = element_size;
+	arr->ptr = gb_alloc(allocator, element_size * cap);
+}
 
-	GB_ASSERT(element_size > 0);
+void
+gb_array_init(gbDynamicArray *arr, gbAllocator allocator, isize element_size) {
+	gb_array_init_reserve(arr, allocator, element_size, gb_array_grow_formula(0));
+}
 
-	if (capacity == h->capacity)
-		return array;
+void
+gb_array_free(gbDynamicArray *arr) {
+	gb_free(arr->allocator, arr->ptr);
+}
 
-	if (capacity < h->count) {
-		if (h->capacity < capacity) {
-			isize new_capacity = GB_ARRAY_GROW_FORMULA(h->capacity);
-			if (new_capacity < capacity)
-				new_capacity = capacity;
-			gb__array_set_capacity(array, new_capacity, element_size);
+void
+gb_array_set_capacity(gbDynamicArray *arr, isize new_cap) {
+	if (arr->cap != new_cap) {
+		void *new_ptr = gb_alloc(arr->allocator, arr->element_size * new_cap);
+		isize to_copy = arr->len;
+		if (to_copy > new_cap) {
+			to_copy = new_cap;
 		}
-		h->count = capacity;
-	}
-
-	{
-		isize size = gb_size_of(gbArrayHeader) + element_size*capacity;
-		gbArrayHeader *nh = cast(gbArrayHeader *)gb_alloc(h->allocator, size);
-		gb_memmove(nh, h, gb_size_of(gbArrayHeader) + element_size*h->count);
-		nh->allocator = h->allocator;
-		nh->count     = h->count;
-		nh->capacity  = capacity;
-		gb_free(h->allocator, h);
-		return nh+1;
+		gb_memcopy(new_ptr, arr->ptr, arr->element_size * to_copy);
+		gb_free(arr->allocator, arr->ptr);
+		arr->ptr = new_ptr;
+		arr->cap = new_cap;
+		arr->len = to_copy;
 	}
 }
 
+// TODO(bill): Decide on a decent growing formula for gbArray
+void 
+gb_array_grow(gbDynamicArray *arr, isize min_capacity) {
+	isize new_capacity = gb_array_grow_formula(arr->cap);
+	if (new_capacity < min_capacity) {
+		new_capacity = min_capacity;
+	}
+	gb_array_set_capacity(arr, new_capacity);
+}
+
+void *
+gb_array_append(gbDynamicArray *arr, void *item) {
+	if (arr->cap < arr->len + 1) {
+		gb_array_grow(arr, 0);
+	}
+	void *dest = (u8 *)arr->ptr + arr->len * arr->element_size;
+	gb_memcopy(dest, item, arr->element_size);
+	arr->len += 1;
+	return dest;
+}
+
+void *
+gb_array_appendv(gbDynamicArray *arr, void *items, isize item_count) {
+	if (arr->cap < arr->len + item_count) {
+		gb_array_grow(arr, arr->len + item_count);
+	}
+	void *dest = (u8 *)arr->ptr + arr->len * arr->element_size;
+	gb_memcopy(dest, items, arr->element_size * item_count);
+	arr->len += item_count;
+	return dest;
+}
+
+void
+gb_array_pop(gbDynamicArray *arr) { 
+	GB_ASSERT(arr->len > 0); 
+	arr->len -= 1; 
+}
+
+void
+gb_array_clear(gbDynamicArray *arr) {
+	arr->len = 0; 
+}
+
+void
+gb_array_resize(gbDynamicArray *arr, isize new_count) {
+	if (arr->cap < new_count) {
+		gb_array_grow(arr, new_count);
+	}
+	arr->len = new_count;
+}
+
+void
+gb_array_reserve(gbDynamicArray *arr, isize new_capacity) {
+	if (arr->cap < new_capacity) {
+		gb_array_set_capacity(arr, new_capacity);
+	}
+}
 
 ////////////////////////////////////////////////////////////////
 //
