@@ -1,25 +1,26 @@
-#include <stdint.h>
-#include <stdio.h>
-#include <assert.h>
-#include <stdbool.h>
-#include <stdlib.h>
+#define GB_IMPLEMENTATION
+#define GB_STATIC
+#include "gb.h"
 
 #include "llvm-c/Core.h"
 
-typedef uint8_t u8;
-typedef int32_t i32;
-typedef uint64_t u64;
 
-typedef double f64;
+#if defined(GB_COMPILER_MSVC)
+#pragma warning(disable:4201) // nonstandard extension used: nameless struct/union
+#pragma warning(disable:4204) // nonstandard extension used: non-constant aggregate initializer
+#pragma warning(disable:4820) // padding
+#pragma warning(disable:4255) // no function prototype given: converting '()' to '(void)'
+#pragma warning(disable:5045) // Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified
+#endif
 
 
 typedef struct String {
 	char *ptr;
-	u64 len; // NOTE(khvorov) Does not include the null terminator
+	isize len; // NOTE(khvorov) Does not include the null terminator
 } String;
 
 
-typedef enum TokenType {
+typedef enum TokenKind {
 	TokenType_EOF,
 
 	TokenType_Def,
@@ -29,20 +30,14 @@ typedef enum TokenType {
 	TokenType_Number,
 
 	TokenType_Ascii,
-} TokenType;
+} TokenKind;
 
 typedef struct Token {
-	TokenType type;
+	TokenKind type;
 	String identifier;
 	f64 number;
 	char ascii;
 } Token;
-
-typedef struct TokenArray {
-	Token *ptr;
-	u64 len;
-	u64 cap;
-} TokenArray;
 
 
 typedef struct AstNumber {
@@ -111,46 +106,11 @@ typedef struct AstNode {
 	};
 } AstNode;
 
-typedef struct AstNodeArray {
-	AstNode *ptr;
-	u64 len;
-	u64 cap;
-} AstNodeArray;
-
 typedef struct AstParser {
-	AstNodeArray nodes;
+	AstNode *nodes;
 	Token *token;
 	u64 token_count;
 } AstParser;
-
-
-static bool
-char_is_alpha(char ch) {
-	bool is_lower = ch >= 'a' && ch <= 'z';
-	bool is_upper = ch >= 'A' && ch <= 'Z';
-	bool result = is_lower || is_upper;
-	return result;
-}
-
-static bool
-char_is_digit(char ch) {
-	bool result = ch >= '0' && ch <= '9';
-	return result;
-}
-
-static bool
-char_is_alphanum(char ch) {
-	bool is_number = char_is_digit(ch);
-	bool is_alpha = char_is_alpha(ch);
-	bool result = is_number || is_alpha;
-	return result;
-}
-
-static bool
-char_is_space(char ch) {
-	bool result = ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
-	return result;
-}
 
 
 static String
@@ -170,14 +130,14 @@ string_from_cstring(char *ptr) {
 
 static void
 string_print(String *str) {
-	for (u64 index = 0; index < str->len; index += 1) {
-		printf("%c", str->ptr[index]);
+	for (isize index = 0; index < str->len; index += 1) {
+		gb_printf("%c", str->ptr[index]);
 	}
 }
 
 static void
-string_offset(String *str, u64 offset, String *pre) {
-	assert(str->len >= offset);
+string_offset(String *str, isize offset, String *pre) {
+	GB_ASSERT(str->len >= offset);
 	if (pre != 0) {
 		pre->ptr = str->ptr;
 		pre->len = offset;	
@@ -186,12 +146,12 @@ string_offset(String *str, u64 offset, String *pre) {
 	str->len -= offset;
 }
 
-static u64
+static isize
 string_index_nonalphanum(String *str) {
-	u64 result = 0;
+	isize result = 0;
 	while (result < str->len) {
 		char ch = str->ptr[result];
-		if (!char_is_alphanum(ch)) {
+		if (!gb_char_is_alphanumeric(ch)) {
 			break;
 		}
 		result += 1;
@@ -199,12 +159,12 @@ string_index_nonalphanum(String *str) {
 	return result;
 }
 
-static u64
+static isize
 string_index_nonfloat(String *str) {
-	u64 result = 0;
+	isize result = 0;
 	while (result < str->len) {
 		char ch = str->ptr[result];
-		if (!char_is_digit(ch) && ch != '.') {
+		if (!gb_char_is_digit(ch) && ch != '.') {
 			break;
 		}
 		result += 1;
@@ -212,10 +172,10 @@ string_index_nonfloat(String *str) {
 	return result;
 }
 
-static bool
+static b32
 string_cmp_cstring(String *str, char *cstring) {
-	bool result = true;
-	u64 index = 0;
+	b32 result = true;
+	isize index = 0;
 	while (index < str->len) {
 		char c1 = str->ptr[index];
 		char c2 = cstring[index];
@@ -233,10 +193,10 @@ string_cmp_cstring(String *str, char *cstring) {
 
 static void
 string_offset_to_next_line(String *str) {
-	for (u64 index = 0; index < str->len; index += 1) {
+	for (isize index = 0; index < str->len; index += 1) {
 		char ch = str->ptr[index];
 		if (ch == '\n' || ch == '\r') {
-			u64 to_skip = index + 1;
+			isize to_skip = index + 1;
 			if (ch == '\r' && to_skip < str->len && str->ptr[to_skip] == '\n') {
 				to_skip += 1;
 			}
@@ -252,10 +212,10 @@ get_token(String *input) {
 	Token result = { 0 };
 
 	// NOTE(khvorov) Skip spaces and comments
-	bool skipped = true;
+	b32 skipped = true;
 	while (skipped) {
 		skipped = false;
-		while ((input->len > 0) && char_is_space(input->ptr[0])) {
+		while ((input->len > 0) && gb_char_is_space(input->ptr[0])) {
 			string_offset(input, 1, 0);
 			skipped = true;
 		}
@@ -266,7 +226,7 @@ get_token(String *input) {
 	}
 
 	if (input->len > 0) {
-		if (char_is_alpha(input->ptr[0])) {
+		if (gb_char_is_alpha(input->ptr[0])) {
 
 			u64 identifier_end = string_index_nonalphanum(input);
 			string_offset(input, identifier_end, &result.identifier);
@@ -279,7 +239,7 @@ get_token(String *input) {
 				result.type = TokenType_Identifier;
 			}
 
-		} else if (char_is_digit(input->ptr[0])) {
+		} else if (gb_char_is_digit(input->ptr[0])) {
 
 			u64 number_end = string_index_nonfloat(input);
 			result.number = strtod(input->ptr, 0);
@@ -313,61 +273,25 @@ get_cur_tok_precedence(AstParser *parser) {
 	return result;
 }
 
-static TokenArray
-make_token_array() {
-	TokenArray result = { 0, 0, 100 };
-	result.ptr = malloc(sizeof(Token) * result.cap);
-	return result;
-}
-
-static void
-token_array_push(TokenArray *arr, Token token) {
-	assert(arr->len <= arr->cap);
-	if (arr->len == arr->cap) {
-		arr->cap *= 2;
-		arr->ptr = realloc(arr->ptr, sizeof(Token) * arr->cap);
-	}
-	arr->ptr[arr->len] = token;
-	arr->len += 1;
-}
-
 
 static void 
 parser_advance(AstParser *parser) {
-	assert(parser->token_count > 0);
+	GB_ASSERT(parser->token_count > 0);
 	parser->token += 1;
 	parser->token_count -= 1;
-}
-
-static AstNodeArray
-make_ast_node_array() {
-	AstNodeArray result = { 0, 0, 100 };
-	result.ptr = malloc(sizeof(AstNode) * result.cap);
-	return result;
-}
-
-static AstNode *
-ast_node_array_push(AstNodeArray *arr, AstNode node) {
-	assert(arr->len <= arr->cap);
-	if (arr->len == arr->cap) {
-		arr->cap *= 2;
-		arr->ptr = realloc(arr->ptr, sizeof(AstNode) * arr->cap);
-	}
-	AstNode *result = arr->ptr + arr->len;
-	*result = node;
-	arr->len += 1;
-	return result;
 }
 
 static AstNode *
 parse_number(AstParser *parser) {
 	Token *token = parser->token;
-	assert(token->type == TokenType_Number);
+	GB_ASSERT(token->type == TokenType_Number);
 	AstNumber number = { token->number };
 	AstNode num_node = { AstType_Number, .number = number };
 	parser_advance(parser);
 
-	AstNode *result = ast_node_array_push(&parser->nodes, num_node);
+	gb_array_append(parser->nodes, num_node);
+	AstNode *result = gb_array_last(parser->nodes);
+
 	return result;
 }
 
@@ -383,14 +307,14 @@ parse_expr(AstParser *parser) {
 
 static AstNode *
 parse_paren(AstParser *parser) {
-	assert(parser->token->type == TokenType_Ascii);
-	assert(parser->token->ascii == '(');
+	GB_ASSERT(parser->token->type == TokenType_Ascii);
+	GB_ASSERT(parser->token->ascii == '(');
 	parser_advance(parser);
 
 	AstNode *expr = parse_expr(parser);
 
-	assert(parser->token->type == TokenType_Ascii);
-	assert(parser->token->ascii == ')');
+	GB_ASSERT(parser->token->type == TokenType_Ascii);
+	GB_ASSERT(parser->token->ascii == ')');
 	parser_advance(parser);
 
 	return expr;
@@ -398,7 +322,7 @@ parse_paren(AstParser *parser) {
 
 static AstNode *
 parse_iden(AstParser *parser) {
-	assert(parser->token->type == TokenType_Identifier);
+	GB_ASSERT(parser->token->type == TokenType_Identifier);
 	String name = parser->token->identifier;
 	parser_advance(parser);
 
@@ -406,21 +330,23 @@ parse_iden(AstParser *parser) {
 	if (parser->token->type != TokenType_Ascii || parser->token->ascii != '(') {
 		AstVariable var = { name };
 		AstNode var_node = { AstType_Variable, .variable = var };
-		result = ast_node_array_push(&parser->nodes, var_node);
+		gb_array_append(parser->nodes, var_node);
+		result = gb_array_last(parser->nodes);
 	} else {
 
 		parser_advance(parser);
-		AstCall call = { name, parser->nodes.ptr + parser->nodes.len, 0 };
+		AstCall call = { name, parser->nodes + gb_array_count(parser->nodes), 0 };
 
 		while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
-			assert(call.arg_count < 255);
+			GB_ASSERT(call.arg_count < 255);
 			parse_expr(parser);
 			call.arg_count += 1;
 		}
 		parser_advance(parser);
 
 		AstNode call_node = { AstType_Call, .call = call };
-		result = ast_node_array_push(&parser->nodes, call_node);
+		gb_array_append(parser->nodes, call_node);
+		result = gb_array_last(parser->nodes);
 	}
 
 	return result;
@@ -449,7 +375,7 @@ parse_primary(AstParser *parser) {
 
 	}
 
-	assert(result != 0);
+	GB_ASSERT(result != 0);
 	return result;
 }
 
@@ -475,7 +401,8 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 
 		AstBinary merged = { binop, result, rhs };
 		AstNode merged_node = { AstType_Binary, .binary = merged };
-		result = ast_node_array_push(&parser->nodes, merged_node);
+		gb_array_append(parser->nodes, merged_node);
+		result = gb_array_last(parser->nodes);
 	}
 
 	return result;
@@ -483,34 +410,35 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 
 static AstNode *
 parse_prototype(AstParser *parser) {
-	assert(parser->token->type == TokenType_Identifier);
+	GB_ASSERT(parser->token->type == TokenType_Identifier);
 
 	String fn_name = parser->token->identifier;
 	parser_advance(parser);
 
-	assert(parser->token->type == TokenType_Ascii && parser->token->ascii == '(');
+	GB_ASSERT(parser->token->type == TokenType_Ascii && parser->token->ascii == '(');
 	parser_advance(parser);
 
-	AstPrototype proto = { fn_name, parser->nodes.ptr + parser->nodes.len, 0 };
+	AstPrototype proto = { fn_name, parser->nodes + gb_array_count(parser->nodes), 0 };
 	while (parser->token->type == TokenType_Ascii && parser->token->ascii == ')') {
-		assert(parser->token->type == TokenType_Identifier);
-		assert(proto.param_count < 255);
+		GB_ASSERT(parser->token->type == TokenType_Identifier);
+		GB_ASSERT(proto.param_count < 255);
 		String param_name = parser->token->identifier;
 		AstFnParameter param = { param_name };
 		AstNode param_node = { AstType_FnParameter, .fn_parameter = param };
-		ast_node_array_push(&parser->nodes, param_node);
+		gb_array_append(parser->nodes, param_node);
 		proto.param_count += 1;
 		parser_advance(parser);
 	}
 
 	AstNode proto_node = { AstType_Prototype, .prototype = proto };
-	AstNode *result = ast_node_array_push(&parser->nodes, proto_node);
+	gb_array_append(parser->nodes, proto_node);
+	AstNode *result = gb_array_last(parser->nodes);
 	return result;
 }
 
 static AstNode *
 parse_definition(AstParser *parser) {
-	assert(parser->token->type == TokenType_Def);
+	GB_ASSERT(parser->token->type == TokenType_Def);
 	parser_advance(parser);
 	
 	AstNode *proto = parse_prototype(parser);
@@ -518,13 +446,14 @@ parse_definition(AstParser *parser) {
 
 	AstFunction fn = { proto, body };
 	AstNode fn_node = { AstType_Function, .function = fn };
-	AstNode *result = ast_node_array_push(&parser->nodes, fn_node);
+	gb_array_append(parser->nodes, fn_node);
+	AstNode *result = gb_array_last(parser->nodes);
 	return result;
 }
 
 static AstNode *
 parse_extern(AstParser *parser) {
-	assert(parser->token->type == TokenType_Extern);
+	GB_ASSERT(parser->token->type == TokenType_Extern);
 	parser_advance(parser);
 
 	AstNode *proto = parse_prototype(parser);
@@ -536,17 +465,19 @@ parse_top_level_expr(AstParser *parser) {
 	AstNode *expr = parse_expr(parser);
 	AstPrototype proto = { 0 };
 	AstNode proto_node = { AstType_Prototype, .prototype = proto };
-	AstNode *proto_node_ptr = ast_node_array_push(&parser->nodes, proto_node);
+	gb_array_append(parser->nodes, proto_node);
+	AstNode *proto_node_ptr = gb_array_last(parser->nodes);
 	AstFunction fn = { proto_node_ptr, expr };
 	AstNode fn_node = { AstType_Function, .function = fn };
-	AstNode *fn_node_ptr = ast_node_array_push(&parser->nodes, fn_node);
+	gb_array_append(parser->nodes, fn_node);
+	AstNode *fn_node_ptr = gb_array_last(parser->nodes);
 	return fn_node_ptr;
 }
 
 
 static LLVMValueRef
 lb_number(AstNode *node) {
-	assert(node->type == AstType_Number);
+	GB_ASSERT(node->type == AstType_Number);
 	f64 val = node->number.val;
 	LLVMContextRef ctx = LLVMGetGlobalContext();
 	LLVMTypeRef type_double = LLVMDoubleTypeInContext(ctx);	
@@ -560,24 +491,28 @@ main() {
 
 	String input = string_from_cstring("a + 1");
 
-	TokenArray tokens = make_token_array();
+	gbAllocator heap_allocator = gb_heap_allocator();
+
+	gbArray(Token) tokens;
+	gb_array_init(tokens, heap_allocator);
 	while (true) {
 		Token token = get_token(&input);
 		if (token.type == TokenType_EOF) {
 			break;
 		}
-		token_array_push(&tokens, token);
+		gb_array_append(tokens, token);
 	}
 
-	AstNodeArray ast_node_array = make_ast_node_array();
-	AstParser parser = { ast_node_array, tokens.ptr, tokens.len };
+	gbArray(AstNode) nodes;
+	gb_array_init(nodes, heap_allocator);
+	AstParser parser = { nodes, tokens, gb_array_count(tokens) };
 
 	while (parser.token_count > 0) {
 		Token *token = parser.token;
 
 		switch (token->type) {
 		case TokenType_EOF: {
-			assert(!"unexpected eof");
+			GB_ASSERT(!"unexpected eof");
 		} break;
 
 		case TokenType_Ascii: {
