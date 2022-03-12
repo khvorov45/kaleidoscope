@@ -1596,71 +1596,9 @@ typedef struct gbBufferHeader {
 #define gb_buffer_pop(x)   do { GB_ASSERT(gb_buffer_count(x) > 0); gb_buffer_count(x)--; } while (0)
 #define gb_buffer_clear(x) do { gb_buffer_count(x) = 0; } while (0)
 
-
-
-////////////////////////////////////////////////////////////////
 //
-// Dynamic Array (POD Types)
+// SECTION Dynamic Array
 //
-// NOTE(bill): I know this is a macro hell but C is an old (and shit) language with no proper arrays
-// Also why the fuck not?! It fucking works! And it has custom allocation, which is already better than C++!
-//
-// gbArray(Type) works like gbString or gbBuffer where the actual type is just a pointer to the first
-// element.
-//
-
-
-
-// Available Procedures for gbArray(Type)
-// gb_array_init
-// gb_array_free
-// gb_array_set_capacity
-// gb_array_grow
-// gb_array_append
-// gb_array_appendv
-// gb_array_pop
-// gb_array_clear
-// gb_array_resize
-// gb_array_reserve
-//
-
-#if 0 // Example
-void foo(void) {
-	isize i;
-	int test_values[] = {4, 2, 1, 7};
-	gbAllocator a = gb_heap_allocator();
-	gbArray(int) items;
-
-	gb_array_init(items, a);
-
-	gb_array_append(items, 1);
-	gb_array_append(items, 4);
-	gb_array_append(items, 9);
-	gb_array_append(items, 16);
-
-	items[1] = 3; // Manually set value
-	              // NOTE: No array bounds checking
-
-	for (i = 0; i < items.count; i++)
-		gb_printf("%d\n", items[i]);
-	// 1
-	// 3
-	// 9
-	// 16
-
-	gb_array_clear(items);
-
-	gb_array_appendv(items, test_values, gb_count_of(test_values));
-	for (i = 0; i < items.count; i++)
-		gb_printf("%d\n", items[i]);
-	// 4
-	// 2
-	// 1
-	// 7
-
-	gb_array_free(items);
-}
-#endif
 
 typedef struct gbDynamicArray {
 	void       	*ptr;
@@ -1682,11 +1620,11 @@ GB_DEF void gb_array_pop(gbDynamicArray *arr);
 GB_DEF void gb_array_clear(gbDynamicArray *arr);
 GB_DEF void gb_array_resize(gbDynamicArray *arr, isize new_count);
 GB_DEF void gb_array_reserve(gbDynamicArray *arr, isize new_capacity);
+GB_DEF void *gb_array_get(gbDynamicArray *arr, isize index);
+GB_DEF void *gb_array_set(gbDynamicArray *arr, isize index, void *value);
 
-////////////////////////////////////////////////////////////////
 //
-// Hashing and Checksum Functions
-//
+// SECTION Hashing and Checksum Functions
 //
 
 GB_EXTERN u32 gb_adler32(void const *data, isize len);
@@ -1708,168 +1646,41 @@ GB_EXTERN u32 gb_murmur32_seed(void const *data, isize len, u32 seed);
 GB_EXTERN u64 gb_murmur64_seed(void const *data, isize len, u64 seed);
 
 
-////////////////////////////////////////////////////////////////
 //
-// Instantiated Hash Table
-//
-// This is an attempt to implement a templated hash table
-// NOTE(bill): The key is aways a u64 for simplicity and you will _probably_ _never_ need anything bigger.
-//
-// Hash table type and function declaration, call: GB_TABLE_DECLARE(PREFIX, NAME, N, VALUE)
-// Hash table function definitions, call: GB_TABLE_DEFINE(NAME, N, VALUE)
-//
-//     PREFIX  - a prefix for function prototypes e.g. extern, static, etc.
-//     NAME    - Name of the Hash Table
-//     FUNC    - the name will prefix function names
-//     VALUE   - the type of the value to be stored
-//
-// NOTE(bill): I really wish C had decent metaprogramming capabilities (and no I don't mean C++'s templates either)
+// SECTION Hash Table
 //
 
+typedef struct gbHashTable {
+	gbDynamicArray entry_indices;
+	gbDynamicArray entry_headers;
+	gbDynamicArray entry_values;
+} gbHashTable;
+
+typedef struct gbHashTableEntryHeader {
+	u64   key;
+	isize next;
+} gbHashTableEntryHeader;
+
 typedef struct gbHashTableFindResult {
-	isize hash_index;
+	isize entry_index_index;
 	isize entry_prev;
 	isize entry_index;
 } gbHashTableFindResult;
 
-#define GB_TABLE(PREFIX, NAME, FUNC, VALUE) \
-	GB_TABLE_DECLARE(PREFIX, NAME, FUNC, VALUE); \
-	GB_TABLE_DEFINE(NAME, FUNC, VALUE);
+GB_DEF void  gb_htab_init(gbHashTable *htab, gbAllocator a, isize value_size);
+GB_DEF void  gb_htab_destroy(gbHashTable *htab);
+GB_DEF void* gb_htab_get(gbHashTable *htab, u64 key);
+GB_DEF void  gb_htab_set(gbHashTable *htab, u64 key, void *value);
+GB_DEF void  gb_htab_grow(gbHashTable *htab);
+GB_DEF void  gb_htab_rehash(gbHashTable *htab, isize new_count);
 
-#define GB_TABLE_DECLARE(PREFIX, NAME, FUNC, VALUE) \
-typedef struct GB_JOIN2(NAME,Entry) { \
-	u64 key; \
-	isize next; \
-	VALUE value; \
-} GB_JOIN2(NAME,Entry); \
-\
-typedef struct NAME { \
-	gbArray(isize) hashes; \
-	gbArray(GB_JOIN2(NAME,Entry)) entries; \
-} NAME; \
-\
-PREFIX void                  GB_JOIN2(FUNC,init)       (NAME *h, gbAllocator a); \
-PREFIX void                  GB_JOIN2(FUNC,destroy)    (NAME *h); \
-PREFIX VALUE *               GB_JOIN2(FUNC,get)        (NAME *h, u64 key); \
-PREFIX void                  GB_JOIN2(FUNC,set)        (NAME *h, u64 key, VALUE value); \
-PREFIX void                  GB_JOIN2(FUNC,grow)       (NAME *h); \
-PREFIX void                  GB_JOIN2(FUNC,rehash)     (NAME *h, isize new_count); \
+GB_DEF isize                 gb_htab__add_entry(gbHashTable *htab, u64 key);
+GB_DEF gbHashTableFindResult gb_htab__find(gbHashTable *htab, u64 key);
+GB_DEF b32                   gb_htab__full(gbHashTable *htab);
 
-
-
-
-
-#define GB_TABLE_DEFINE(NAME, FUNC, VALUE) \
-void GB_JOIN2(FUNC,init)(NAME *h, gbAllocator a) { \
-	gb_array_init(h->hashes,  a); \
-	gb_array_init(h->entries, a); \
-} \
-\
-void GB_JOIN2(FUNC,destroy)(NAME *h) { \
-	if (h->entries) gb_array_free(h->entries); \
-	if (h->hashes)  gb_array_free(h->hashes); \
-} \
-\
-gb_internal isize GB_JOIN2(FUNC,_add_entry)(NAME *h, u64 key) { \
-	isize index; \
-	GB_JOIN2(NAME,Entry) e = {0}; \
-	e.key = key; \
-	e.next = -1; \
-	index = gb_array_count(h->entries); \
-	gb_array_append(h->entries, e); \
-	return index; \
-} \
-\
-gb_internal gbHashTableFindResult GB_JOIN2(FUNC,_find)(NAME *h, u64 key) { \
-	gbHashTableFindResult r = {-1, -1, -1}; \
-	if (gb_array_count(h->hashes) > 0) { \
-		r.hash_index  = key % gb_array_count(h->hashes); \
-		r.entry_index = h->hashes[r.hash_index]; \
-		while (r.entry_index >= 0) { \
-			if (h->entries[r.entry_index].key == key) \
-				return r; \
-			r.entry_prev = r.entry_index; \
-			r.entry_index = h->entries[r.entry_index].next; \
-		} \
-	} \
-	return r; \
-} \
-\
-gb_internal b32 GB_JOIN2(FUNC,_full)(NAME *h) { \
-	return 0.75f * gb_array_count(h->hashes) < gb_array_count(h->entries); \
-} \
-\
-void GB_JOIN2(FUNC,grow)(NAME *h) { \
-	isize new_count = gb_array_grow_formula(gb_array_count(h->entries)); \
-	GB_JOIN2(FUNC,rehash)(h, new_count); \
-} \
-\
-void GB_JOIN2(FUNC,rehash)(NAME *h, isize new_count) { \
-	isize i, j; \
-	NAME nh = {0}; \
-	GB_JOIN2(FUNC,init)(&nh, gb_array_allocator(h->hashes)); \
-	gb_array_resize(nh.hashes, new_count); \
-	gb_array_reserve(nh.entries, gb_array_count(h->entries)); \
-	for (i = 0; i < new_count; i++) \
-		nh.hashes[i] = -1; \
-	for (i = 0; i < gb_array_count(h->entries); i++) { \
-		GB_JOIN2(NAME,Entry) *e; \
-		gbHashTableFindResult fr; \
-		if (gb_array_count(nh.hashes) == 0) \
-			GB_JOIN2(FUNC,grow)(&nh); \
-		e = &h->entries[i]; \
-		fr = GB_JOIN2(FUNC,_find)(&nh, e->key); \
-		j = GB_JOIN2(FUNC,_add_entry)(&nh, e->key); \
-		if (fr.entry_prev < 0) \
-			nh.hashes[fr.hash_index] = j; \
-		else \
-			nh.entries[fr.entry_prev].next = j; \
-		nh.entries[j].next = fr.entry_index; \
-		nh.entries[j].value = e->value; \
-		if (GB_JOIN2(FUNC,_full)(&nh)) \
-			GB_JOIN2(FUNC,grow)(&nh); \
-	} \
-	GB_JOIN2(FUNC,destroy)(h); \
-	h->hashes  = nh.hashes; \
-	h->entries = nh.entries; \
-} \
-\
-VALUE *GB_JOIN2(FUNC,get)(NAME *h, u64 key) { \
-	isize index = GB_JOIN2(FUNC,_find)(h, key).entry_index; \
-	if (index >= 0) \
-		return &h->entries[index].value; \
-	return NULL; \
-} \
-\
-void GB_JOIN2(FUNC,set)(NAME *h, u64 key, VALUE value) { \
-	isize index; \
-	gbHashTableFindResult fr; \
-	if (gb_array_count(h->hashes) == 0) \
-		GB_JOIN2(FUNC,grow)(h); \
-	fr = GB_JOIN2(FUNC,_find)(h, key); \
-	if (fr.entry_index >= 0) { \
-		index = fr.entry_index; \
-	} else { \
-		index = GB_JOIN2(FUNC,_add_entry)(h, key); \
-		if (fr.entry_prev >= 0) { \
-			h->entries[fr.entry_prev].next = index; \
-		} else { \
-			h->hashes[fr.hash_index] = index; \
-		} \
-	} \
-	h->entries[index].value = value; \
-	if (GB_JOIN2(FUNC,_full)(h)) \
-		GB_JOIN2(FUNC,grow)(h); \
-} \
-
-
-
-
-////////////////////////////////////////////////////////////////
 //
-// File Handling
+// SECTION File Handling
 //
-
 
 typedef u32 gbFileMode;
 typedef enum gbFileModeFlag {
@@ -7041,6 +6852,19 @@ gb_array_reserve(gbDynamicArray *arr, isize new_capacity) {
 	}
 }
 
+void *
+gb_array_get(gbDynamicArray *arr, isize index) {
+	void *result = (u8 *)arr->ptr + index * arr->element_size;
+	return result;
+}
+
+void *
+gb_array_set(gbDynamicArray *arr, isize index, void *value) {
+	void *entry = gb_array_get(arr, index);
+	gb_memcopy(entry, value, arr->element_size);
+	return entry;
+}
+
 ////////////////////////////////////////////////////////////////
 //
 // Hashing functions
@@ -7433,16 +7257,158 @@ u64 gb_murmur64_seed(void const *data_, isize len, u64 seed) {
 #endif
 }
 
-
-
-
-
-
-
-////////////////////////////////////////////////////////////////
 //
-// File Handling
+// SECTION Hash Table
 //
+
+void
+gb_htab_init(gbHashTable *htab, gbAllocator allocator, isize value_size) {
+	gb_array_init(&htab->entry_indices,  allocator, sizeof(isize));
+	gb_array_init(&htab->entry_headers, allocator, sizeof(gbHashTableEntryHeader));
+	gb_array_init(&htab->entry_values, allocator, value_size);
+}
+
+void
+gb_htab_destroy(gbHashTable *htab) {
+	gb_array_free(&htab->entry_indices);
+	gb_array_free(&htab->entry_headers);
+	gb_array_free(&htab->entry_values);
+}
+
+void *
+gb_htab_get(gbHashTable *htab, u64 key) {
+	isize index = gb_htab__find(htab, key).entry_index;
+	void *result = 0;
+	if (index >= 0) {
+		result = gb_array_get(&htab->entry_values, index);
+	}
+	return result;
+}
+
+void
+gb_htab_set(gbHashTable *htab, u64 key, void *value) {
+
+	if (htab->entry_indices.len == 0) {
+		gb_htab_grow(htab);
+	}
+
+	gbHashTableFindResult fr = gb_htab__find(htab, key);
+
+	isize index;
+	if (fr.entry_index >= 0) {
+		index = fr.entry_index;
+	} else {
+		index = gb_htab__add_entry(htab, key);
+		if (fr.entry_prev >= 0) {
+			gbHashTableEntryHeader *prev = gb_array_get(&htab->entry_headers, fr.entry_prev);
+			prev->next = index;
+		} else {
+			isize *hash = gb_array_get(&htab->entry_indices, fr.entry_index_index);
+			*hash = index;
+		}
+	}
+
+	gb_array_set(&htab->entry_values, index, value);
+	if (gb_htab__full(htab)) {
+		gb_htab_grow(htab);
+	}
+}
+
+void
+gb_htab_grow(gbHashTable *htab) {
+	isize new_count = gb_array_grow_formula(htab->entry_headers.len);
+	gb_htab_rehash(htab, new_count);
+}
+
+void
+gb_htab_rehash(gbHashTable *htab, isize new_count) {
+
+	gbHashTable new_htab = { 0 };
+	gb_htab_init(&new_htab, htab->entry_indices.allocator, htab->entry_values.element_size);
+	gb_array_resize(&new_htab.entry_indices, new_count);
+	gb_array_reserve(&new_htab.entry_headers, htab->entry_headers.len);
+	gb_array_reserve(&new_htab.entry_values, htab->entry_headers.len);
+
+	for (isize index = 0; index < new_count; index++) {
+		*(isize *)gb_array_get(&new_htab.entry_indices, index) = -1;
+	}
+
+	for (isize entry_index = 0; entry_index < htab->entry_headers.len; entry_index++) {
+		if (new_htab.entry_indices.len == 0) {
+			gb_htab_grow(&new_htab);
+		}
+
+		gbHashTableEntryHeader *header = gb_array_get(&htab->entry_headers, entry_index);
+		gbHashTableFindResult fr = gb_htab__find(&new_htab, header->key);
+		isize new_entry_index = gb_htab__add_entry(&new_htab, header->key);
+
+		if (fr.entry_prev < 0) {
+			*(isize *)gb_array_get(&new_htab.entry_indices, fr.entry_index_index) = new_entry_index;
+		}
+		else {
+			gbHashTableEntryHeader *prev = gb_array_get(&new_htab.entry_headers, fr.entry_prev);
+			prev->next = new_entry_index;
+		}
+
+		gbHashTableEntryHeader *new_entry = gb_array_get(&new_htab.entry_headers, new_entry_index);
+		new_entry->next = fr.entry_index;
+
+		void *value = gb_array_get(&htab->entry_values, entry_index);
+		gb_array_set(&new_htab.entry_values, new_entry_index, value);
+
+		if (gb_htab__full(&new_htab)) {
+			gb_htab_grow(&new_htab);
+		}
+	}
+
+	gb_htab_destroy(htab);
+	htab->entry_indices  = new_htab.entry_indices;
+	htab->entry_headers = new_htab.entry_headers;
+	htab->entry_values = new_htab.entry_values;
+}
+
+isize
+gb_htab__add_entry(gbHashTable *htab, u64 key) {
+	gbHashTableEntryHeader header = { 0 };
+	header.key = key;
+	header.next = -1;
+	isize index = htab->entry_headers.len;
+	gb_array_append(&htab->entry_headers, &header);
+	gb_array_resize(&htab->entry_values, htab->entry_headers.len);
+	return index;
+}
+
+gbHashTableFindResult
+gb_htab__find(gbHashTable *htab, u64 key) {
+
+	gbHashTableFindResult result = { -1, -1, -1 };
+
+	if (htab->entry_indices.len > 0) {
+
+		result.entry_index_index  = key % htab->entry_indices.len;
+		result.entry_index = *(isize *)gb_array_get(&htab->entry_indices, result.entry_index_index);
+
+		while (result.entry_index >= 0) {
+			gbHashTableEntryHeader *this_entry = gb_array_get(&htab->entry_headers, result.entry_index);
+			if (this_entry->key == key) {
+				break;
+			}
+			result.entry_prev = result.entry_index;
+			result.entry_index = this_entry->next;
+		}
+	}
+
+	return result;
+}
+
+b32
+gb_htab__full(gbHashTable *htab) {
+	b32 result = 0.75f * htab->entry_indices.len < htab->entry_headers.len;
+	return result;
+}
+
+//
+// SECTION File Handling
 //
 
 #if defined(GB_SYSTEM_WINDOWS)

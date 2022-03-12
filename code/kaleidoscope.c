@@ -113,14 +113,11 @@ typedef struct AstParser {
 	isize token_count;
 } AstParser;
 
-typedef struct NamedValues {
-	isize ignore;
-} NamedValues;
 
 typedef struct LLVMBackend {
 	LLVMContextRef ctx;
 	LLVMBuilderRef builder;
-	NamedValues named_values;
+	gbHashTable named_values;
 } LLVMBackend;
 
 
@@ -475,17 +472,9 @@ parse_top_level_expr(AstParser *parser) {
 	return fn_node_ptr;
 }
 
-static void
-named_values_init(NamedValues *named_values, gbAllocator allocator) {
-	return;
-}
-
-static LLVMValueRef
-named_values_get(NamedValues *named_values, u64 hash) {
-	LLVMValueRef result = 0;
-	return result;
-}
-
+//
+// SECTION LLVM
+//
 
 static LLVMValueRef lb_node(LLVMBackend *lb, AstNode *node);
 
@@ -503,7 +492,7 @@ lb_variable(LLVMBackend *lb, AstNode *node) {
 	GB_ASSERT(node->type == AstType_Variable);
 	String name = node->variable.name;
 	u64 name_hash = gb_murmur64(name.ptr, name.len);
-	LLVMValueRef result = named_values_get(&lb->named_values, name_hash);
+	LLVMValueRef result = gb_htab_get(&lb->named_values, name_hash);
 	return result;
 }
 
@@ -549,6 +538,10 @@ lb_node(LLVMBackend *lb, AstNode *node) {
 	LLVMValueRef result = 0;
 	return result;
 }
+
+//
+// SECTION Main
+//
 
 int
 main() {
@@ -601,7 +594,18 @@ main() {
 	LLVMBackend llvm_backend;
 	llvm_backend.ctx = LLVMGetGlobalContext();
 	llvm_backend.builder = LLVMCreateBuilderInContext(llvm_backend.ctx);
-	named_values_init(&llvm_backend.named_values, heap_allocator);
+	gb_htab_init(&llvm_backend.named_values, heap_allocator, sizeof(LLVMValueRef));
+
+	String temp_key = string_from_cstring("test");
+	u64 temp_key_hash = gb_murmur64(temp_key.ptr, temp_key.len);
+	LLVMValueRef temp_val = (LLVMValueRef)123;
+	gb_htab_set(&llvm_backend.named_values, temp_key_hash, &temp_val);
+
+	u64 temp_key_hash2 = temp_key_hash + 8;
+	LLVMValueRef temp_val2 = (LLVMValueRef)(1232);
+	gb_htab_set(&llvm_backend.named_values, temp_key_hash2, &temp_val2);
+
+	gb_htab_get(&llvm_backend.named_values, temp_key_hash2);
 
 	lb_node(&llvm_backend, top_level_node);
 
