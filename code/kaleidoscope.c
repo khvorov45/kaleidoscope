@@ -214,6 +214,29 @@ string_offset_to_next_line(String *str) {
 	}
 }
 
+static u64
+string_hash(String *str) {
+	u64 result = gb_murmur64(str->ptr, str->len);
+	return result;
+}
+
+static b32
+string_cmp(String *str1, String *str2) {
+	b32 result = false;
+	if (str1->len == str2->len) {
+		result = true;
+		for (isize index = 0; index < str1->len; index += 1) {
+			char ch1 = str1->ptr[index];
+			char ch2 = str2->ptr[index];
+			if (ch1 != ch2) {
+				result = false;
+				break;
+			}
+		}
+	}
+	return result;
+}
+
 
 static Token
 get_token(String *input) {
@@ -490,9 +513,7 @@ lb_number(LLVMBackend *lb, AstNode *node) {
 static LLVMValueRef
 lb_variable(LLVMBackend *lb, AstNode *node) {
 	GB_ASSERT(node->type == AstType_Variable);
-	String name = node->variable.name;
-	u64 name_hash = gb_murmur64(name.ptr, name.len);
-	LLVMValueRef result = gb_htab_get(&lb->named_values, name_hash);
+	LLVMValueRef result = gb_htab_get(&lb->named_values, &node->variable.name);
 	return result;
 }
 
@@ -594,18 +615,22 @@ main() {
 	LLVMBackend llvm_backend;
 	llvm_backend.ctx = LLVMGetGlobalContext();
 	llvm_backend.builder = LLVMCreateBuilderInContext(llvm_backend.ctx);
-	gb_htab_init(&llvm_backend.named_values, heap_allocator, sizeof(LLVMValueRef));
+	gb_htab_init(
+		&llvm_backend.named_values, heap_allocator, sizeof(String), sizeof(LLVMValueRef),
+		string_hash, string_cmp
+	);
 
 	String temp_key = string_from_cstring("test");
-	u64 temp_key_hash = gb_murmur64(temp_key.ptr, temp_key.len);
 	LLVMValueRef temp_val = (LLVMValueRef)123;
-	gb_htab_set(&llvm_backend.named_values, temp_key_hash, &temp_val);
+	gb_htab_set(&llvm_backend.named_values, &temp_key, &temp_val);
 
-	u64 temp_key_hash2 = temp_key_hash + 8;
+	String temp_key2 = string_from_cstring("test2");
 	LLVMValueRef temp_val2 = (LLVMValueRef)(1232);
-	gb_htab_set(&llvm_backend.named_values, temp_key_hash2, &temp_val2);
+	gb_htab_set(&llvm_backend.named_values, &temp_key2, &temp_val2);
 
-	gb_htab_get(&llvm_backend.named_values, temp_key_hash2);
+	gb_htab_get(&llvm_backend.named_values, &temp_key2);
+
+	gb_htab_rehash(&llvm_backend.named_values, 10);
 
 	lb_node(&llvm_backend, top_level_node);
 

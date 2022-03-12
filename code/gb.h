@@ -1650,14 +1650,19 @@ GB_EXTERN u64 gb_murmur64_seed(void const *data, isize len, u64 seed);
 // SECTION Hash Table
 //
 
+typedef u64 KeyHashProc(void *key);
+typedef b32 KeyCmpProc(void *key1, void *key2);
+
 typedef struct gbHashTable {
 	gbDynamicArray entry_indices;
 	gbDynamicArray entry_headers;
+	gbDynamicArray key_values;
 	gbDynamicArray entry_values;
+	KeyHashProc*   key_hash_proc;
+	KeyCmpProc*    key_cmp_proc;
 } gbHashTable;
 
 typedef struct gbHashTableEntryHeader {
-	u64   key;
 	isize next;
 } gbHashTableEntryHeader;
 
@@ -1667,15 +1672,18 @@ typedef struct gbHashTableFindResult {
 	isize entry_index;
 } gbHashTableFindResult;
 
-GB_DEF void  gb_htab_init(gbHashTable *htab, gbAllocator a, isize value_size);
+GB_DEF void gb_htab_init(
+	gbHashTable *htab, gbAllocator allocator, isize key_size, isize value_size, 
+	KeyHashProc *key_hash_proc, KeyCmpProc *key_cmp_proc
+);
 GB_DEF void  gb_htab_destroy(gbHashTable *htab);
-GB_DEF void* gb_htab_get(gbHashTable *htab, u64 key);
-GB_DEF void  gb_htab_set(gbHashTable *htab, u64 key, void *value);
+GB_DEF void* gb_htab_get(gbHashTable *htab, void *key);
+GB_DEF void  gb_htab_set(gbHashTable *htab, void *key, void *value);
 GB_DEF void  gb_htab_grow(gbHashTable *htab);
 GB_DEF void  gb_htab_rehash(gbHashTable *htab, isize new_count);
 
-GB_DEF isize                 gb_htab__add_entry(gbHashTable *htab, u64 key);
-GB_DEF gbHashTableFindResult gb_htab__find(gbHashTable *htab, u64 key);
+GB_DEF isize                 gb_htab__add_header(gbHashTable *htab);
+GB_DEF gbHashTableFindResult gb_htab__find(gbHashTable *htab, void *key);
 GB_DEF b32                   gb_htab__full(gbHashTable *htab);
 
 //
@@ -7262,21 +7270,36 @@ u64 gb_murmur64_seed(void const *data_, isize len, u64 seed) {
 //
 
 void
-gb_htab_init(gbHashTable *htab, gbAllocator allocator, isize value_size) {
-	gb_array_init(&htab->entry_indices,  allocator, sizeof(isize));
+gb_htab_init(
+	gbHashTable *htab, gbAllocator allocator, isize key_size, isize value_size, 
+	KeyHashProc *key_hash_proc, KeyCmpProc *key_cmp_proc
+) {
+
+	gb_array_init(&htab->entry_indices, allocator, sizeof(isize));
 	gb_array_init(&htab->entry_headers, allocator, sizeof(gbHashTableEntryHeader));
+	gb_array_init(&htab->key_values, allocator, key_size);
 	gb_array_init(&htab->entry_values, allocator, value_size);
+
+	htab->key_hash_proc = key_hash_proc;
+	htab->key_cmp_proc = key_cmp_proc;
+
+	gb_array_resize(&htab->entry_indices, htab->entry_indices.cap);
+	for (isize index = 0; index < htab->entry_indices.len; index++) {
+		isize neg1 = -1;
+		gb_array_set(&htab->entry_indices, index, &neg1);
+	}
 }
 
 void
 gb_htab_destroy(gbHashTable *htab) {
 	gb_array_free(&htab->entry_indices);
 	gb_array_free(&htab->entry_headers);
+	gb_array_free(&htab->key_values);
 	gb_array_free(&htab->entry_values);
 }
 
 void *
-gb_htab_get(gbHashTable *htab, u64 key) {
+gb_htab_get(gbHashTable *htab, void *key) {
 	isize index = gb_htab__find(htab, key).entry_index;
 	void *result = 0;
 	if (index >= 0) {
@@ -7286,7 +7309,7 @@ gb_htab_get(gbHashTable *htab, u64 key) {
 }
 
 void
-gb_htab_set(gbHashTable *htab, u64 key, void *value) {
+gb_htab_set(gbHashTable *htab, void *key, void *value) {
 
 	if (htab->entry_indices.len == 0) {
 		gb_htab_grow(htab);
@@ -7298,16 +7321,16 @@ gb_htab_set(gbHashTable *htab, u64 key, void *value) {
 	if (fr.entry_index >= 0) {
 		index = fr.entry_index;
 	} else {
-		index = gb_htab__add_entry(htab, key);
+		index = gb_htab__add_header(htab);
 		if (fr.entry_prev >= 0) {
 			gbHashTableEntryHeader *prev = gb_array_get(&htab->entry_headers, fr.entry_prev);
 			prev->next = index;
 		} else {
-			isize *hash = gb_array_get(&htab->entry_indices, fr.entry_index_index);
-			*hash = index;
+			gb_array_set(&htab->entry_indices, fr.entry_index_index, &index);
 		}
 	}
 
+	gb_array_set(&htab->key_values, index, key);
 	gb_array_set(&htab->entry_values, index, value);
 	if (gb_htab__full(htab)) {
 		gb_htab_grow(htab);
@@ -7324,26 +7347,34 @@ void
 gb_htab_rehash(gbHashTable *htab, isize new_count) {
 
 	gbHashTable new_htab = { 0 };
-	gb_htab_init(&new_htab, htab->entry_indices.allocator, htab->entry_values.element_size);
+	gb_htab_init(
+		&new_htab, htab->entry_indices.allocator, 
+		htab->key_values.element_size, htab->entry_values.element_size,
+		htab->key_hash_proc, htab->key_cmp_proc
+	);
+	isize old_entry_indices_size = new_htab.entry_indices.len;
 	gb_array_resize(&new_htab.entry_indices, new_count);
 	gb_array_reserve(&new_htab.entry_headers, htab->entry_headers.len);
+	gb_array_reserve(&new_htab.key_values, htab->entry_headers.len);
 	gb_array_reserve(&new_htab.entry_values, htab->entry_headers.len);
 
-	for (isize index = 0; index < new_count; index++) {
-		*(isize *)gb_array_get(&new_htab.entry_indices, index) = -1;
-	}
+	for (isize index = old_entry_indices_size; index < new_count; index += 1) {
+		isize neg1 = -1;
+		gb_array_set(&new_htab.entry_indices, index, &neg1);
+	}	
 
 	for (isize entry_index = 0; entry_index < htab->entry_headers.len; entry_index++) {
 		if (new_htab.entry_indices.len == 0) {
 			gb_htab_grow(&new_htab);
 		}
 
-		gbHashTableEntryHeader *header = gb_array_get(&htab->entry_headers, entry_index);
-		gbHashTableFindResult fr = gb_htab__find(&new_htab, header->key);
-		isize new_entry_index = gb_htab__add_entry(&new_htab, header->key);
+		void *key = gb_array_get(&htab->key_values, entry_index);
+		gbHashTableFindResult fr = gb_htab__find(&new_htab, key);
+		isize new_entry_index = gb_htab__add_header(&new_htab);
+		gb_array_set(&new_htab.key_values, new_entry_index, key);
 
 		if (fr.entry_prev < 0) {
-			*(isize *)gb_array_get(&new_htab.entry_indices, fr.entry_index_index) = new_entry_index;
+			gb_array_set(&new_htab.entry_indices, fr.entry_index_index, &new_entry_index);
 		}
 		else {
 			gbHashTableEntryHeader *prev = gb_array_get(&new_htab.entry_headers, fr.entry_prev);
@@ -7368,33 +7399,35 @@ gb_htab_rehash(gbHashTable *htab, isize new_count) {
 }
 
 isize
-gb_htab__add_entry(gbHashTable *htab, u64 key) {
+gb_htab__add_header(gbHashTable *htab) {
 	gbHashTableEntryHeader header = { 0 };
-	header.key = key;
 	header.next = -1;
 	isize index = htab->entry_headers.len;
 	gb_array_append(&htab->entry_headers, &header);
+	gb_array_resize(&htab->key_values, htab->entry_headers.len);
 	gb_array_resize(&htab->entry_values, htab->entry_headers.len);
 	return index;
 }
 
 gbHashTableFindResult
-gb_htab__find(gbHashTable *htab, u64 key) {
+gb_htab__find(gbHashTable *htab, void *key) {
 
 	gbHashTableFindResult result = { -1, -1, -1 };
 
 	if (htab->entry_indices.len > 0) {
 
-		result.entry_index_index  = key % htab->entry_indices.len;
+		u64 key_hash = htab->key_hash_proc(key);
+		result.entry_index_index = key_hash % htab->entry_indices.len;
 		result.entry_index = *(isize *)gb_array_get(&htab->entry_indices, result.entry_index_index);
 
 		while (result.entry_index >= 0) {
-			gbHashTableEntryHeader *this_entry = gb_array_get(&htab->entry_headers, result.entry_index);
-			if (this_entry->key == key) {
+			gbHashTableEntryHeader *this_header = gb_array_get(&htab->entry_headers, result.entry_index);
+			void *this_key = gb_array_get(&htab->key_values, result.entry_index);
+			if (htab->key_cmp_proc(this_key, key)) {
 				break;
 			}
 			result.entry_prev = result.entry_index;
-			result.entry_index = this_entry->next;
+			result.entry_index = this_header->next;
 		}
 	}
 
