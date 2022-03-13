@@ -62,7 +62,7 @@ typedef struct AstBinary {
 typedef struct AstCall {
 	String callee;
 	struct AstNode *args;
-	u8 arg_count;
+	isize arg_count;
 } AstCall;
 
 typedef struct AstPrototype {
@@ -117,7 +117,10 @@ typedef struct AstParser {
 typedef struct LLVMBackend {
 	LLVMContextRef ctx;
 	LLVMBuilderRef builder;
+	LLVMModuleRef module;
 	gbHashTable named_values;
+	gbArena scratch_memory;
+	gbAllocator arena_allocator;
 } LLVMBackend;
 
 
@@ -133,6 +136,13 @@ string_from_cstring(char *ptr) {
 		}
 	}
 	String result = { ptr, len };
+	return result;
+}
+
+static char *
+string_to_cstring(String *str, gbAllocator allocator) {
+	char *result = gb_alloc(allocator, (str->len + 1) * sizeof(char));
+	result[str->len] = '\0';
 	return result;
 }
 
@@ -365,7 +375,6 @@ parse_iden(AstParser *parser) {
 		AstCall call = { name, (AstNode *)parser->nodes.ptr + parser->nodes.len, 0 };
 
 		while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
-			GB_ASSERT(call.arg_count < 255);
 			parse_expr(parser);
 			call.arg_count += 1;
 		}
@@ -502,31 +511,27 @@ parse_top_level_expr(AstParser *parser) {
 static LLVMValueRef lb_node(LLVMBackend *lb, AstNode *node);
 
 static LLVMValueRef
-lb_number(LLVMBackend *lb, AstNode *node) {
-	GB_ASSERT(node->type == AstType_Number);
-	f64 val = node->number.val;
+lb_number(LLVMBackend *lb, AstNumber *number) {
+	f64 val = number->val;
 	LLVMTypeRef type_double = LLVMDoubleTypeInContext(lb->ctx);
 	LLVMValueRef llvm_val = LLVMConstReal(type_double, val);
 	return llvm_val;
 }
 
 static LLVMValueRef
-lb_variable(LLVMBackend *lb, AstNode *node) {
-	GB_ASSERT(node->type == AstType_Variable);
-	LLVMValueRef result = gb_htab_get(&lb->named_values, &node->variable.name);
+lb_variable(LLVMBackend *lb, AstVariable *variable) {
+	LLVMValueRef result = gb_htab_get(&lb->named_values, &variable->name);
 	return result;
 }
 
 static LLVMValueRef
-lb_binary(LLVMBackend *lb, AstNode *node) {
-	GB_ASSERT(node->type == AstType_Binary);
-
-	LLVMValueRef lhs = lb_node(lb, node->binary.lhs);
-	LLVMValueRef rhs = lb_node(lb, node->binary.rhs);
+lb_binary(LLVMBackend *lb, AstBinary *binary) {
+	LLVMValueRef lhs = lb_node(lb, binary->lhs);
+	LLVMValueRef rhs = lb_node(lb, binary->rhs);
 
 	LLVMValueRef result = 0;
 
-	switch (node->binary.op) {
+	switch (binary->op) {
 
 	case '+': {
 		result = LLVMBuildFAdd(lb->builder, lhs, rhs, "addtmp");
@@ -555,8 +560,67 @@ lb_binary(LLVMBackend *lb, AstNode *node) {
 }
 
 static LLVMValueRef
+lb_call(LLVMBackend *lb, AstCall *call) {
+	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->scratch_memory);
+
+	char* temp_callee_name = string_to_cstring(&call->callee, lb->arena_allocator);
+	LLVMValueRef callee = LLVMGetNamedFunction(lb->module, temp_callee_name);
+	GB_ASSERT(callee != 0);
+	GB_ASSERT(LLVMCountParams(callee) == call->arg_count);
+
+	LLVMValueRef *arg_vals = gb_alloc_array(lb->arena_allocator, LLVMValueRef, call->arg_count);
+	for (isize arg_index = 0; arg_index < call->arg_count; arg_index += 1) {
+		arg_vals[arg_index] = lb_node(lb, call->args + arg_index);
+	}
+
+	LLVMValueRef result = LLVMBuildCall(lb->builder, callee, arg_vals, (unsigned int)call->arg_count, "calltmp");
+
+	gb_temp_arena_memory_end(temp_memory);
+	return result;
+}
+
+static LLVMValueRef
 lb_node(LLVMBackend *lb, AstNode *node) {
 	LLVMValueRef result = 0;
+
+	switch (node->type) {
+	case AstType_None: {
+		GB_PANIC("unexpected AstType_None");
+	} break;
+
+	case AstType_Number: {
+		result = lb_number(lb, &node->number);
+	} break;
+
+	case AstType_Variable: {
+		result = lb_variable(lb, &node->variable);
+	} break;
+
+	case AstType_FnParameter: {
+		GB_PANIC("unimplemented");
+	} break;
+
+	case AstType_Binary: {
+		result = lb_binary(lb, &node->binary);
+	} break;
+
+	case AstType_Call: {
+		result = lb_call(lb, &node->call);
+	} break;
+
+	case AstType_Prototype: {
+		GB_PANIC("unimplemented");
+	} break;
+
+	case AstType_Block: {
+		GB_PANIC("unimplemented");
+	} break;
+
+	case AstType_Function: {
+		GB_PANIC("unimplemented");
+	} break;
+	}
+
 	return result;
 }
 
@@ -615,22 +679,15 @@ main() {
 	LLVMBackend llvm_backend;
 	llvm_backend.ctx = LLVMGetGlobalContext();
 	llvm_backend.builder = LLVMCreateBuilderInContext(llvm_backend.ctx);
+	llvm_backend.module = LLVMModuleCreateWithNameInContext("KaleidoscopeModule", llvm_backend.ctx);
+
 	gb_htab_init(
 		&llvm_backend.named_values, heap_allocator, sizeof(String), sizeof(LLVMValueRef),
 		string_hash, string_cmp
 	);
 
-	String temp_key = string_from_cstring("test");
-	LLVMValueRef temp_val = (LLVMValueRef)123;
-	gb_htab_set(&llvm_backend.named_values, &temp_key, &temp_val);
-
-	String temp_key2 = string_from_cstring("test2");
-	LLVMValueRef temp_val2 = (LLVMValueRef)(1232);
-	gb_htab_set(&llvm_backend.named_values, &temp_key2, &temp_val2);
-
-	gb_htab_get(&llvm_backend.named_values, &temp_key2);
-
-	gb_htab_rehash(&llvm_backend.named_values, 10);
+	gb_arena_init_from_allocator(&llvm_backend.scratch_memory, heap_allocator, gb_megabytes(4));
+	llvm_backend.arena_allocator = gb_arena_allocator(&llvm_backend.scratch_memory);
 
 	lb_node(&llvm_backend, top_level_node);
 
