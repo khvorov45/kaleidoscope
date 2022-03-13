@@ -73,7 +73,7 @@ typedef struct AstPrototype {
 
 typedef struct AstBlock {
 	struct AstNode *nodes;
-	isize node_count;		
+	isize node_count;
 } AstBlock;
 
 typedef struct AstFunction {
@@ -148,7 +148,7 @@ string_offset(String *str, isize offset, String *pre) {
 	GB_ASSERT(str->len >= offset);
 	if (pre != 0) {
 		pre->ptr = str->ptr;
-		pre->len = offset;	
+		pre->len = offset;
 	}
 	str->ptr += offset;
 	str->len -= offset;
@@ -263,7 +263,7 @@ get_token(String *input) {
 			string_offset(input, identifier_end, &result.identifier);
 
 			if (string_cmp_cstring(&result.identifier, "def")) {
-				result.type = TokenType_Def;	
+				result.type = TokenType_Def;
 			} else if (string_cmp_cstring(&result.identifier, "extern")) {
 				result.type = TokenType_Extern;
 			} else {
@@ -305,7 +305,7 @@ get_cur_tok_precedence(AstParser *parser) {
 }
 
 
-static void 
+static void
 parser_advance(AstParser *parser) {
 	GB_ASSERT(parser->token_count > 0);
 	parser->token += 1;
@@ -380,7 +380,7 @@ parse_iden(AstParser *parser) {
 
 static AstNode *
 parse_primary(AstParser *parser) {
-	
+
 	AstNode *result = 0;
 
 	switch (parser->token->type) {
@@ -419,7 +419,7 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 		parser_advance(parser);
 
 		AstNode *rhs = parse_primary(parser);
-		
+
 		i32 next_prec = get_cur_tok_precedence(parser);
 		if (token_precendence < next_prec) {
 			rhs = parse_binop_rhs(parser, token_precendence + 1, rhs);
@@ -464,7 +464,7 @@ static AstNode *
 parse_definition(AstParser *parser) {
 	GB_ASSERT(parser->token->type == TokenType_Def);
 	parser_advance(parser);
-	
+
 	AstNode *proto = parse_prototype(parser);
 	AstNode *body = parse_expr(parser);
 
@@ -505,7 +505,7 @@ static LLVMValueRef
 lb_number(LLVMBackend *lb, AstNode *node) {
 	GB_ASSERT(node->type == AstType_Number);
 	f64 val = node->number.val;
-	LLVMTypeRef type_double = LLVMDoubleTypeInContext(lb->ctx);	
+	LLVMTypeRef type_double = LLVMDoubleTypeInContext(lb->ctx);
 	LLVMValueRef llvm_val = LLVMConstReal(type_double, val);
 	return llvm_val;
 }
@@ -527,11 +527,11 @@ lb_binary(LLVMBackend *lb, AstNode *node) {
 	LLVMValueRef result = 0;
 
 	switch (node->binary.op) {
-	
+
 	case '+': {
 		result = LLVMBuildFAdd(lb->builder, lhs, rhs, "addtmp");
 	} break;
-	
+
 	case '-': {
 		result = LLVMBuildFSub(lb->builder, lhs, rhs, "subtmp");
 	} break;
@@ -542,7 +542,7 @@ lb_binary(LLVMBackend *lb, AstNode *node) {
 
 	case '<': {
 		LLVMValueRef logical = LLVMBuildFCmp(lb->builder, LLVMRealULT, lhs, rhs, "cmptmp");
-		LLVMTypeRef type_double = LLVMDoubleTypeInContext(lb->ctx);	
+		LLVMTypeRef type_double = LLVMDoubleTypeInContext(lb->ctx);
 		result = LLVMBuildUIToFP(lb->builder, logical, type_double, "booltemp");
 	} break;
 

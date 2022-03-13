@@ -1673,7 +1673,7 @@ typedef struct gbHashTableFindResult {
 } gbHashTableFindResult;
 
 GB_DEF void gb_htab_init(
-	gbHashTable *htab, gbAllocator allocator, isize key_size, isize value_size, 
+	gbHashTable *htab, gbAllocator allocator, isize key_size, isize value_size,
 	KeyHashProc *key_hash_proc, KeyCmpProc *key_cmp_proc
 );
 GB_DEF void  gb_htab_destroy(gbHashTable *htab);
@@ -6760,8 +6760,8 @@ isize gb_utf8_encode_rune(u8 buf[4], Rune r) {
 //
 //
 
-isize 
-gb_array_grow_formula(isize old_count) { 
+isize
+gb_array_grow_formula(isize old_count) {
 	isize result = 2*(old_count) + 8;
 	return result;
 }
@@ -6803,7 +6803,7 @@ gb_array_set_capacity(gbDynamicArray *arr, isize new_cap) {
 }
 
 // TODO(bill): Decide on a decent growing formula for gbArray
-void 
+void
 gb_array_grow(gbDynamicArray *arr, isize min_capacity) {
 	isize new_capacity = gb_array_grow_formula(arr->cap);
 	if (new_capacity < min_capacity) {
@@ -6835,14 +6835,14 @@ gb_array_appendv(gbDynamicArray *arr, void *items, isize item_count) {
 }
 
 void
-gb_array_pop(gbDynamicArray *arr) { 
-	GB_ASSERT(arr->len > 0); 
-	arr->len -= 1; 
+gb_array_pop(gbDynamicArray *arr) {
+	GB_ASSERT(arr->len > 0);
+	arr->len -= 1;
 }
 
 void
 gb_array_clear(gbDynamicArray *arr) {
-	arr->len = 0; 
+	arr->len = 0;
 }
 
 void
@@ -7271,7 +7271,7 @@ u64 gb_murmur64_seed(void const *data_, isize len, u64 seed) {
 
 void
 gb_htab_init(
-	gbHashTable *htab, gbAllocator allocator, isize key_size, isize value_size, 
+	gbHashTable *htab, gbAllocator allocator, isize key_size, isize value_size,
 	KeyHashProc *key_hash_proc, KeyCmpProc *key_cmp_proc
 ) {
 
@@ -7348,7 +7348,7 @@ gb_htab_rehash(gbHashTable *htab, isize new_count) {
 
 	gbHashTable new_htab = { 0 };
 	gb_htab_init(
-		&new_htab, htab->entry_indices.allocator, 
+		&new_htab, htab->entry_indices.allocator,
 		htab->key_values.element_size, htab->entry_values.element_size,
 		htab->key_hash_proc, htab->key_cmp_proc
 	);
@@ -7361,7 +7361,7 @@ gb_htab_rehash(gbHashTable *htab, isize new_count) {
 	for (isize index = old_entry_indices_size; index < new_count; index += 1) {
 		isize neg1 = -1;
 		gb_array_set(&new_htab.entry_indices, index, &neg1);
-	}	
+	}
 
 	for (isize entry_index = 0; entry_index < htab->entry_headers.len; entry_index++) {
 		if (new_htab.entry_indices.len == 0) {
