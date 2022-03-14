@@ -1682,6 +1682,7 @@ GB_DEF void  gb_htab_set(gbHashTable *htab, void *key, void *value);
 GB_DEF void  gb_htab_grow(gbHashTable *htab);
 GB_DEF void  gb_htab_rehash(gbHashTable *htab, isize new_count);
 
+GB_DEF void                  gb_htab__reset_entry_indices(gbHashTable *htab);
 GB_DEF isize                 gb_htab__add_header(gbHashTable *htab);
 GB_DEF gbHashTableFindResult gb_htab__find(gbHashTable *htab, void *key);
 GB_DEF b32                   gb_htab__full(gbHashTable *htab);
@@ -7283,11 +7284,15 @@ gb_htab_init(
 	htab->key_hash_proc = key_hash_proc;
 	htab->key_cmp_proc = key_cmp_proc;
 
-	gb_array_resize(&htab->entry_indices, htab->entry_indices.cap);
-	for (isize index = 0; index < htab->entry_indices.len; index++) {
-		isize neg1 = -1;
-		gb_array_set(&htab->entry_indices, index, &neg1);
-	}
+	gb_htab__reset_entry_indices(htab);
+}
+
+void
+gb_htab_clear(gbHashTable *htab) {
+	gb_htab__reset_entry_indices(htab);
+	gb_array_clear(&htab->entry_headers);
+	gb_array_clear(&htab->key_values);
+	gb_array_clear(&htab->entry_values);
 }
 
 void
@@ -7396,6 +7401,15 @@ gb_htab_rehash(gbHashTable *htab, isize new_count) {
 	htab->entry_indices  = new_htab.entry_indices;
 	htab->entry_headers = new_htab.entry_headers;
 	htab->entry_values = new_htab.entry_values;
+}
+
+void
+gb_htab__reset_entry_indices(gbHashTable *htab) {
+	gb_array_resize(&htab->entry_indices, htab->entry_indices.cap);
+	for (isize index = 0; index < htab->entry_indices.len; index++) {
+		isize neg1 = -1;
+		gb_array_set(&htab->entry_indices, index, &neg1);
+	}
 }
 
 isize

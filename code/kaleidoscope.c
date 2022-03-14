@@ -3,6 +3,7 @@
 #include "gb.h"
 
 #include "llvm-c/Core.h"
+#include "llvm-c/Analysis.h"
 
 
 #if defined(GB_COMPILER_MSVC)
@@ -68,7 +69,7 @@ typedef struct AstCall {
 typedef struct AstPrototype {
 	String name;
 	struct AstNode *param;
-	u8 param_count;
+	isize param_count;
 } AstPrototype;
 
 typedef struct AstBlock {
@@ -142,6 +143,7 @@ string_from_cstring(char *ptr) {
 static char *
 string_to_cstring(String *str, gbAllocator allocator) {
 	char *result = gb_alloc(allocator, (str->len + 1) * sizeof(char));
+	gb_memcopy(result, str->ptr, str->len);
 	result[str->len] = '\0';
 	return result;
 }
@@ -453,9 +455,8 @@ parse_prototype(AstParser *parser) {
 	parser_advance(parser);
 
 	AstPrototype proto = { fn_name, (AstNode *)parser->nodes.ptr + parser->nodes.len, 0 };
-	while (parser->token->type == TokenType_Ascii && parser->token->ascii == ')') {
+	while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
 		GB_ASSERT(parser->token->type == TokenType_Identifier);
-		GB_ASSERT(proto.param_count < 255);
 		String param_name = parser->token->identifier;
 		AstFnParameter param = { param_name };
 		AstNode param_node = { AstType_FnParameter, .fn_parameter = param };
@@ -463,6 +464,9 @@ parse_prototype(AstParser *parser) {
 		proto.param_count += 1;
 		parser_advance(parser);
 	}
+
+	GB_ASSERT(parser->token->type == TokenType_Ascii && parser->token->ascii == ')');
+	parser_advance(parser);
 
 	AstNode proto_node = { AstType_Prototype, .prototype = proto };
 	AstNode *result = gb_array_append(&parser->nodes, &proto_node);
@@ -520,7 +524,9 @@ lb_number(LLVMBackend *lb, AstNumber *number) {
 
 static LLVMValueRef
 lb_variable(LLVMBackend *lb, AstVariable *variable) {
-	LLVMValueRef result = gb_htab_get(&lb->named_values, &variable->name);
+	LLVMValueRef *find_result = gb_htab_get(&lb->named_values, &variable->name);
+	GB_ASSERT_NOT_NULL(find_result);
+	LLVMValueRef result = *find_result;
 	return result;
 }
 
@@ -580,6 +586,62 @@ lb_call(LLVMBackend *lb, AstCall *call) {
 }
 
 static LLVMValueRef
+lb_proto(LLVMBackend *lb, AstPrototype *proto) {
+	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->scratch_memory);
+
+	LLVMTypeRef *arg_types = gb_alloc_array(lb->arena_allocator, LLVMTypeRef, proto->param_count);
+	LLVMTypeRef llvm_double = LLVMDoubleTypeInContext(lb->ctx);
+	for (isize arg_type_index = 0; arg_type_index < proto->param_count; arg_type_index += 1) {
+		arg_types[arg_type_index] = llvm_double;
+	}
+
+	LLVMTypeRef fun_type = LLVMFunctionType(llvm_double, arg_types, (unsigned int)proto->param_count, false);
+
+	char *temp_fun_name = string_to_cstring(&proto->name, lb->arena_allocator);
+	LLVMValueRef llvm_fun = LLVMAddFunction(lb->module, temp_fun_name, fun_type);
+
+	for (isize arg_index = 0; arg_index < proto->param_count; arg_index += 1) {
+		LLVMValueRef llvm_param = LLVMGetParam(llvm_fun, (unsigned int)arg_index);
+		String param_name = proto->param[arg_index].fn_parameter.name;
+		LLVMSetValueName2(llvm_param, param_name.ptr, param_name.len);
+	}
+
+	gb_temp_arena_memory_end(temp_memory);
+	return llvm_fun;
+}
+
+static LLVMValueRef
+lb_function(LLVMBackend *lb, AstFunction *fun) {
+	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->scratch_memory);
+
+	AstPrototype *proto = &fun->proto->prototype;
+
+	char* temp_fun_name = string_to_cstring(&proto->name, lb->arena_allocator);
+	LLVMValueRef llvm_existing_fun = LLVMGetNamedFunction(lb->module, temp_fun_name);
+	GB_ASSERT(llvm_existing_fun == 0);
+
+	LLVMValueRef llvm_proto = lb_proto(lb, proto);
+
+	LLVMBasicBlockRef entry_block = LLVMAppendBasicBlockInContext(lb->ctx, llvm_proto, "entry");
+	LLVMPositionBuilderAtEnd(lb->builder, entry_block);
+
+	gb_htab_clear(&lb->named_values);
+	for (isize arg_index = 0; arg_index < proto->param_count; arg_index += 1) {
+		LLVMValueRef llvm_param = LLVMGetParam(llvm_proto, (unsigned int)arg_index);
+		String param_name = proto->param[arg_index].fn_parameter.name;
+		gb_htab_set(&lb->named_values, &param_name, &llvm_param);
+	}
+
+	LLVMValueRef llvm_body_return = lb_node(lb, fun->body);
+	LLVMBuildRet(lb->builder, llvm_body_return);
+
+	LLVMVerifyFunction(llvm_proto, LLVMAbortProcessAction);
+
+	gb_temp_arena_memory_end(temp_memory);
+	return llvm_proto;
+}
+
+static LLVMValueRef
 lb_node(LLVMBackend *lb, AstNode *node) {
 	LLVMValueRef result = 0;
 
@@ -609,7 +671,7 @@ lb_node(LLVMBackend *lb, AstNode *node) {
 	} break;
 
 	case AstType_Prototype: {
-		GB_PANIC("unimplemented");
+		lb_proto(lb, &node->prototype);
 	} break;
 
 	case AstType_Block: {
@@ -617,7 +679,7 @@ lb_node(LLVMBackend *lb, AstNode *node) {
 	} break;
 
 	case AstType_Function: {
-		GB_PANIC("unimplemented");
+		lb_function(lb, &node->function);
 	} break;
 	}
 
@@ -631,7 +693,7 @@ lb_node(LLVMBackend *lb, AstNode *node) {
 int
 main() {
 
-	String input = string_from_cstring("a + 1 + 2 - 1 > 3 + 2 + f + s + a");
+	String input = string_from_cstring("def foo(a b) a*b");
 
 	gbAllocator heap_allocator = gb_heap_allocator();
 
@@ -690,6 +752,7 @@ main() {
 	llvm_backend.arena_allocator = gb_arena_allocator(&llvm_backend.scratch_memory);
 
 	lb_node(&llvm_backend, top_level_node);
+	LLVMDumpModule(llvm_backend.module);
 
 	return 0;
 }
