@@ -50,9 +50,14 @@ typedef struct AstVariable {
 	String name;
 } AstVariable;
 
-typedef struct AstFnParameter {
+typedef struct AstParameter {
 	String name;
-} AstFnParameter;
+} AstParameter;
+
+typedef struct AstArgument {
+	struct AstNode *val;
+	struct AstArgument *next;
+} AstArgument;
 
 typedef struct AstBinary {
 	char op;
@@ -62,23 +67,18 @@ typedef struct AstBinary {
 
 typedef struct AstCall {
 	String callee;
-	struct AstNode *args;
+	AstArgument *args;
 	isize arg_count;
 } AstCall;
 
 typedef struct AstPrototype {
 	String name;
-	struct AstNode *param;
+	AstParameter *param;
 	isize param_count;
 } AstPrototype;
 
-typedef struct AstBlock {
-	struct AstNode *nodes;
-	isize node_count;
-} AstBlock;
-
 typedef struct AstFunction {
-	struct AstNode *proto;
+	AstPrototype *proto;
 	struct AstNode *body;
 } AstFunction;
 
@@ -86,12 +86,8 @@ typedef enum AstType {
 	AstType_None,
 	AstType_Number,
 	AstType_Variable,
-	AstType_FnParameter,
 	AstType_Binary,
 	AstType_Call,
-	AstType_Prototype,
-	AstType_Block,
-	AstType_Function,
 } AstType;
 
 typedef struct AstNode {
@@ -99,17 +95,14 @@ typedef struct AstNode {
 	union {
 		AstNumber number;
 		AstVariable variable;
-		AstFnParameter fn_parameter;
 		AstBinary binary;
 		AstCall call;
-		AstPrototype prototype;
-		AstFunction function;
-		AstBlock block;
 	};
 } AstNode;
 
 typedef struct AstParser {
-	gbDynamicArray nodes;
+	gbArena arena;
+	gbAllocator arena_allocator;
 	Token *token;
 	isize token_count;
 } AstParser;
@@ -120,7 +113,7 @@ typedef struct LLVMBackend {
 	LLVMBuilderRef builder;
 	LLVMModuleRef module;
 	gbHashTable named_values;
-	gbArena scratch_memory;
+	gbArena arena;
 	gbAllocator arena_allocator;
 } LLVMBackend;
 
@@ -328,11 +321,11 @@ static AstNode *
 parse_number(AstParser *parser) {
 	Token *token = parser->token;
 	GB_ASSERT(token->type == TokenType_Number);
-	AstNumber number = { token->number };
-	AstNode num_node = { AstType_Number, .number = number };
+	AstNode *num_node = gb_alloc_item(parser->arena_allocator, AstNode);
+	num_node->type = AstType_Number;
+	num_node->number.val = token->number;
 	parser_advance(parser);
-	AstNode *result = gb_array_append(&parser->nodes, &num_node);
-	return result;
+	return num_node;
 }
 
 static AstNode *parse_primary(AstParser *parser);
@@ -366,24 +359,37 @@ parse_iden(AstParser *parser) {
 	String name = parser->token->identifier;
 	parser_advance(parser);
 
-	AstNode *result = 0;
+	AstNode *result = gb_alloc_item(parser->arena_allocator, AstNode);
 	if (parser->token->type != TokenType_Ascii || parser->token->ascii != '(') {
-		AstVariable var = { name };
-		AstNode var_node = { AstType_Variable, .variable = var };
-		result = gb_array_append(&parser->nodes, &var_node);
+		result->type = AstType_Variable;
+		result->variable.name = name;
 	} else {
 
 		parser_advance(parser);
-		AstCall call = { name, (AstNode *)parser->nodes.ptr + parser->nodes.len, 0 };
+		result->type = AstType_Call;
+		result->call.callee = name;
+		result->call.args = 0;
+		result->call.arg_count = 0;
 
-		while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
-			parse_expr(parser);
-			call.arg_count += 1;
+		if (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
+			result->call.args = gb_alloc_item(parser->arena_allocator, AstArgument);
+			AstArgument *current_arg = result->call.args;
+			current_arg->val = parse_expr(parser);
+			current_arg->next = 0;
+			result->call.arg_count = 1;
+
+			while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
+				current_arg->next = gb_alloc_item(parser->arena_allocator, AstArgument);
+				current_arg = current_arg->next;
+				current_arg->val = parse_expr(parser);
+				current_arg->next = 0;
+				result->call.arg_count += 1;
+			}
 		}
-		parser_advance(parser);
 
-		AstNode call_node = { AstType_Call, .call = call };
-		result = gb_array_append(&parser->nodes, &call_node);
+		GB_ASSERT(parser->token->type == TokenType_Ascii);
+		GB_ASSERT(parser->token->ascii == ')');
+		parser_advance(parser);
 	}
 
 	return result;
@@ -436,15 +442,18 @@ parse_binop_rhs(AstParser *parser, i32 precedence, AstNode *lhs) {
 			rhs = parse_binop_rhs(parser, token_precendence + 1, rhs);
 		}
 
-		AstBinary merged = { binop, result, rhs };
-		AstNode merged_node = { AstType_Binary, .binary = merged };
-		result = gb_array_append(&parser->nodes, &merged_node);
+		AstNode *merged = gb_alloc_item(parser->arena_allocator, AstNode);
+		merged->type = AstType_Binary;
+		merged->binary.op = binop;
+		merged->binary.lhs = result;
+		merged->binary.rhs = rhs;
+		result = merged;
 	}
 
 	return result;
 }
 
-static AstNode *
+static AstPrototype *
 parse_prototype(AstParser *parser) {
 	GB_ASSERT(parser->token->type == TokenType_Identifier);
 
@@ -454,58 +463,57 @@ parse_prototype(AstParser *parser) {
 	GB_ASSERT(parser->token->type == TokenType_Ascii && parser->token->ascii == '(');
 	parser_advance(parser);
 
-	AstPrototype proto = { fn_name, (AstNode *)parser->nodes.ptr + parser->nodes.len, 0 };
+	AstPrototype *proto = gb_alloc_item(parser->arena_allocator, AstPrototype);
+	proto->name = fn_name;
+	proto->param = 0;
+	proto->param_count = 0;
+
 	while (parser->token->type != TokenType_Ascii || parser->token->ascii != ')') {
 		GB_ASSERT(parser->token->type == TokenType_Identifier);
-		String param_name = parser->token->identifier;
-		AstFnParameter param = { param_name };
-		AstNode param_node = { AstType_FnParameter, .fn_parameter = param };
-		gb_array_append(&parser->nodes, &param_node);
-		proto.param_count += 1;
+		AstParameter *param = gb_alloc_item(parser->arena_allocator, AstParameter);
+		param->name = parser->token->identifier;
+		proto->param_count += 1;
 		parser_advance(parser);
+
+		if (proto->param == 0) {
+			proto->param = param;
+		}
 	}
 
 	GB_ASSERT(parser->token->type == TokenType_Ascii && parser->token->ascii == ')');
 	parser_advance(parser);
 
-	AstNode proto_node = { AstType_Prototype, .prototype = proto };
-	AstNode *result = gb_array_append(&parser->nodes, &proto_node);
-	return result;
+	return proto;
 }
 
-static AstNode *
+static AstFunction *
 parse_definition(AstParser *parser) {
 	GB_ASSERT(parser->token->type == TokenType_Def);
 	parser_advance(parser);
 
-	AstNode *proto = parse_prototype(parser);
-	AstNode *body = parse_expr(parser);
+	AstFunction *result = gb_alloc_item(parser->arena_allocator, AstFunction);
+	result->proto = parse_prototype(parser);
+	result->body = parse_expr(parser);
 
-	AstFunction fn = { proto, body };
-	AstNode fn_node = { AstType_Function, .function = fn };
-	AstNode *result = gb_array_append(&parser->nodes, &fn_node);
 	return result;
 }
 
-static AstNode *
+static AstPrototype *
 parse_extern(AstParser *parser) {
 	GB_ASSERT(parser->token->type == TokenType_Extern);
 	parser_advance(parser);
 
-	AstNode *proto = parse_prototype(parser);
+	AstPrototype *proto = parse_prototype(parser);
 	return proto;
 }
 
-static AstNode *
+static AstFunction *
 parse_top_level_expr(AstParser *parser) {
-	AstNode *expr = parse_expr(parser);
-	AstPrototype proto = { 0 };
-	AstNode proto_node = { AstType_Prototype, .prototype = proto };
-	AstNode *proto_node_ptr = gb_array_append(&parser->nodes, &proto_node);
-	AstFunction fn = { proto_node_ptr, expr };
-	AstNode fn_node = { AstType_Function, .function = fn };
-	AstNode *fn_node_ptr = gb_array_append(&parser->nodes, &fn_node);
-	return fn_node_ptr;
+	AstFunction *fun = gb_alloc_item(parser->arena_allocator, AstFunction);
+	fun->proto = gb_alloc_item(parser->arena_allocator, AstPrototype);
+	gb_zero_item(fun->proto);
+	fun->body = parse_expr(parser);
+	return fun;
 }
 
 //
@@ -567,7 +575,7 @@ lb_binary(LLVMBackend *lb, AstBinary *binary) {
 
 static LLVMValueRef
 lb_call(LLVMBackend *lb, AstCall *call) {
-	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->scratch_memory);
+	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->arena);
 
 	char* temp_callee_name = string_to_cstring(&call->callee, lb->arena_allocator);
 	LLVMValueRef callee = LLVMGetNamedFunction(lb->module, temp_callee_name);
@@ -575,8 +583,10 @@ lb_call(LLVMBackend *lb, AstCall *call) {
 	GB_ASSERT(LLVMCountParams(callee) == call->arg_count);
 
 	LLVMValueRef *arg_vals = gb_alloc_array(lb->arena_allocator, LLVMValueRef, call->arg_count);
-	for (isize arg_index = 0; arg_index < call->arg_count; arg_index += 1) {
-		arg_vals[arg_index] = lb_node(lb, call->args + arg_index);
+	isize arg_index = 0;
+	for (AstArgument *arg = call->args; arg != 0; arg = arg->next) {
+		arg_vals[arg_index] = lb_node(lb, arg->val);
+		arg_index += 1;
 	}
 
 	LLVMValueRef result = LLVMBuildCall(lb->builder, callee, arg_vals, (unsigned int)call->arg_count, "calltmp");
@@ -587,7 +597,7 @@ lb_call(LLVMBackend *lb, AstCall *call) {
 
 static LLVMValueRef
 lb_proto(LLVMBackend *lb, AstPrototype *proto) {
-	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->scratch_memory);
+	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->arena);
 
 	LLVMTypeRef *arg_types = gb_alloc_array(lb->arena_allocator, LLVMTypeRef, proto->param_count);
 	LLVMTypeRef llvm_double = LLVMDoubleTypeInContext(lb->ctx);
@@ -602,7 +612,7 @@ lb_proto(LLVMBackend *lb, AstPrototype *proto) {
 
 	for (isize arg_index = 0; arg_index < proto->param_count; arg_index += 1) {
 		LLVMValueRef llvm_param = LLVMGetParam(llvm_fun, (unsigned int)arg_index);
-		String param_name = proto->param[arg_index].fn_parameter.name;
+		String param_name = proto->param[arg_index].name;
 		LLVMSetValueName2(llvm_param, param_name.ptr, param_name.len);
 	}
 
@@ -612,23 +622,21 @@ lb_proto(LLVMBackend *lb, AstPrototype *proto) {
 
 static LLVMValueRef
 lb_function(LLVMBackend *lb, AstFunction *fun) {
-	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->scratch_memory);
+	gbTempArenaMemory temp_memory = gb_temp_arena_memory_begin(&lb->arena);
 
-	AstPrototype *proto = &fun->proto->prototype;
-
-	char* temp_fun_name = string_to_cstring(&proto->name, lb->arena_allocator);
+	char* temp_fun_name = string_to_cstring(&fun->proto->name, lb->arena_allocator);
 	LLVMValueRef llvm_existing_fun = LLVMGetNamedFunction(lb->module, temp_fun_name);
 	GB_ASSERT(llvm_existing_fun == 0);
 
-	LLVMValueRef llvm_proto = lb_proto(lb, proto);
+	LLVMValueRef llvm_proto = lb_proto(lb, fun->proto);
 
 	LLVMBasicBlockRef entry_block = LLVMAppendBasicBlockInContext(lb->ctx, llvm_proto, "entry");
 	LLVMPositionBuilderAtEnd(lb->builder, entry_block);
 
 	gb_htab_clear(&lb->named_values);
-	for (isize arg_index = 0; arg_index < proto->param_count; arg_index += 1) {
+	for (isize arg_index = 0; arg_index < fun->proto->param_count; arg_index += 1) {
 		LLVMValueRef llvm_param = LLVMGetParam(llvm_proto, (unsigned int)arg_index);
-		String param_name = proto->param[arg_index].fn_parameter.name;
+		String param_name = fun->proto->param[arg_index].name;
 		gb_htab_set(&lb->named_values, &param_name, &llvm_param);
 	}
 
@@ -646,41 +654,11 @@ lb_node(LLVMBackend *lb, AstNode *node) {
 	LLVMValueRef result = 0;
 
 	switch (node->type) {
-	case AstType_None: {
-		GB_PANIC("unexpected AstType_None");
-	} break;
-
-	case AstType_Number: {
-		result = lb_number(lb, &node->number);
-	} break;
-
-	case AstType_Variable: {
-		result = lb_variable(lb, &node->variable);
-	} break;
-
-	case AstType_FnParameter: {
-		GB_PANIC("unimplemented");
-	} break;
-
-	case AstType_Binary: {
-		result = lb_binary(lb, &node->binary);
-	} break;
-
-	case AstType_Call: {
-		result = lb_call(lb, &node->call);
-	} break;
-
-	case AstType_Prototype: {
-		lb_proto(lb, &node->prototype);
-	} break;
-
-	case AstType_Block: {
-		GB_PANIC("unimplemented");
-	} break;
-
-	case AstType_Function: {
-		lb_function(lb, &node->function);
-	} break;
+	case AstType_None: { GB_PANIC("unexpected AstType_None"); } break;
+	case AstType_Number: { result = lb_number(lb, &node->number); } break;
+	case AstType_Variable: { result = lb_variable(lb, &node->variable); } break;
+	case AstType_Binary: { result = lb_binary(lb, &node->binary); } break;
+	case AstType_Call: { result = lb_call(lb, &node->call); } break;
 	}
 
 	return result;
@@ -693,7 +671,7 @@ lb_node(LLVMBackend *lb, AstNode *node) {
 int
 main() {
 
-	String input = string_from_cstring("def foo(a b) a*b");
+	String input = string_from_cstring("def foo(x y z) foo(1 2 3)");
 
 	gbAllocator heap_allocator = gb_heap_allocator();
 
@@ -708,11 +686,12 @@ main() {
 	}
 
 	AstParser parser = { 0 };
-	gb_array_init(&parser.nodes, heap_allocator, sizeof(AstNode));
+	gb_arena_init_from_allocator(&parser.arena, heap_allocator, gb_megabytes(4));
+	parser.arena_allocator = gb_arena_allocator(&parser.arena);
 	parser.token = tokens.ptr;
 	parser.token_count = tokens.len;
 
-	AstNode *top_level_node = 0;
+	AstFunction *top_level_node = 0;
 	switch (parser.token->type) {
 	case TokenType_EOF: {
 		GB_ASSERT(!"unexpected eof");
@@ -729,7 +708,8 @@ main() {
 	} break;
 
 	case TokenType_Extern: {
-		top_level_node = parse_extern(&parser);
+		GB_ASSERT("unimplemented");
+		//top_level_node = parse_extern(&parser);
 	} break;
 
 	default: {
@@ -748,10 +728,10 @@ main() {
 		string_hash, string_cmp
 	);
 
-	gb_arena_init_from_allocator(&llvm_backend.scratch_memory, heap_allocator, gb_megabytes(4));
-	llvm_backend.arena_allocator = gb_arena_allocator(&llvm_backend.scratch_memory);
+	gb_arena_init_from_allocator(&llvm_backend.arena, heap_allocator, gb_megabytes(4));
+	llvm_backend.arena_allocator = gb_arena_allocator(&llvm_backend.arena);
 
-	lb_node(&llvm_backend, top_level_node);
+	lb_function(&llvm_backend, top_level_node);
 	LLVMDumpModule(llvm_backend.module);
 
 	return 0;
